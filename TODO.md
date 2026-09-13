@@ -35,16 +35,33 @@
 - [x] **Exit:** 86 passed / 0 failed · ruff clean · mypy strict clean (34 files)
       · `psm db verify` on a fresh DB returns 0
 
-## Phase 1 — macOS inventory collector  ← NEXT
-- [ ] modules: apps / launchd / tcc / files / browser (incl. Brave)
-- [ ] **F3** Chrome/Edge/Brave `Secure Preferences` + regression test
-      (v1 read `Preferences` and found 0 of 10 real extensions, recording no gap)
-- [ ] `normalize/macos.py` + golden fixtures from this machine
-- [ ] `psm doctor mac` — tier reporting
-- [ ] scan report rendering
-- [ ] **Exit:** LaunchAgent + unsigned binary surface as events, < 45 s
+## Phase 1 — macOS inventory collector  ✅ COMPLETE
+- [x] modules: apps / launchd (+ BTM login items) / tcc / files / browser
+- [x] **F3** Chrome/Edge/Brave/Arc/Vivaldi/Opera `Secure Preferences` + 5 tests.
+      Live result: **21 extensions found where v1 found 0**, 6 with broad host access
+- [x] `normalize/macos.py` + 18 module tests from real-shaped fixtures
+- [x] `psm doctor mac` — tier reporting (done in Phase 0)
+- [x] scan report rendering
+- [x] codesign-based signature status (~6 ms/binary); `spctl` deliberately not
+      used in the walk at ~670 ms/call
+- [x] builtin rules rewritten for macOS; `unknown` dropped from the unsigned-binary
+      rule — it meant "we did not check", and alerting on that is not detection
+- [x] **Exit:** LaunchAgent + unsigned binary → both surface, correlation alert
+      fires on two independent paths (the plist and the BTM item macOS registers
+      for it), removal detected, chain verifies. **9.7 s cold, 3.8 s warm**
+      (target < 45 s). 104 tests green, ruff + mypy strict clean.
 
-## Phase 2 — Android inventory collector
+### Found while building Phase 1
+- TCC `auth_value` is not a boolean: 0 denied · 2 allowed · 3/4/5 limited.
+  v1's `bool(auth_value)` reported 5 limited grants as full ones.
+- TCC's primary key includes `indirect_object_identifier`; the v1 subject key
+  collided on the very first real database.
+- `sfltool dumpbtm` nests `#n:` numbering inside `Embedded Item Identifiers`,
+  which a naive record splitter turns into phantom entries.
+- Chromium `manifest.theme` is usually `{}` — falsy, so a truth test fails to
+  filter themes out of the extension list.
+
+## Phase 2 — Android inventory collector  ← NEXT
 - [ ] adb wrapper + `adb pair`/`connect` flow (wireless)
 - [ ] **single-pass** `dumpsys package` (v1 called it 2×/package)
 - [ ] modules: packages / permissions / special_access / storage / downloads
@@ -98,7 +115,8 @@
 - `JAVA_HOME=/opt/homebrew/opt/openjdk@17` (needed for the Kotlin agent, Phase 5)
 - No system Python 3.12 — use `uv`
 - `eslogger`: present, 104 event types. SIP enabled, keep it that way
-- Full Disk Access: **not yet granted** — TCC reads currently fail
+- Full Disk Access: **granted to Ghostty** (2026-09-14) — TCC reads work;
+  140 grants visible across the user and system databases
 
 ## Backlog (not before v2.0)
 - [ ] Root-tier Android modules (memory, private storage)

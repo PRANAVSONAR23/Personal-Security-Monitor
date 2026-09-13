@@ -1,0 +1,8 @@
+id: new-login-item
+severity: notice
+title: "New background/login item registered"
+match:
+  category: persistence
+  action: added
+  where:
+    payload.location: "loginitem"

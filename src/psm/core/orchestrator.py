@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from psm import __version__
-from psm.collectors.base import Collector, Normalizer
+from psm.collectors.base import Collector, FileCacheAware, Normalizer
 from psm.core.chain import append_events
 from psm.core.diff import diff
 from psm.core.models import Alert, Device, Event, Snapshot, utcnow_iso
@@ -22,9 +22,11 @@ from psm.store.db import transaction
 from psm.store.queries import (
     insert_alert,
     insert_snapshot,
+    load_file_hash_cache,
     load_item_payload,
     load_snapshot,
     load_snapshot_index,
+    save_file_hash_cache,
 )
 
 
@@ -74,6 +76,14 @@ def take_snapshot(
 
     collector, normalizer = _resolve(device, **collector_kwargs)
 
+    # The controller owns storage; the collector stays a pure input→output
+    # producer. It never opens the database, and we never interpret the cache.
+    cache_aware: FileCacheAware | None = (
+        collector if isinstance(collector, FileCacheAware) else None
+    )
+    if cache_aware is not None:
+        cache_aware.load_file_cache(load_file_hash_cache(conn, device.id))
+
     planned = collector.capabilities(device)
     target = (modules & planned) if modules else planned
     bundle = collector.collect(device, target)
@@ -98,6 +108,8 @@ def take_snapshot(
 
     with transaction(conn):
         insert_snapshot(conn, snapshot, items)
+        if cache_aware is not None:
+            save_file_hash_cache(conn, device.id, cache_aware.dump_file_cache())
 
         if kind != "baseline":
             prior_id = _previous_snapshot_id(conn, device.id, snapshot.id)

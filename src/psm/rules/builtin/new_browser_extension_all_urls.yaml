@@ -5,9 +5,4 @@ match:
   category: browser
   action: added
   where:
-    payload.permissions:
-      has_any:
-        - "<all_urls>"
-        - "*://*/*"
-        - "https://*/*"
-        - "http://*/*"
+    payload.broad_host_access: true

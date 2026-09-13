@@ -195,8 +195,6 @@ def test_builtin_rules_load():
     assert {
         "unsigned-binary-user-path",
         "persistence-plus-new-file",
-        "new-hklm-persistence",
-        "new-hkcu-persistence",
         "new-application",
         "new-browser-extension-all-urls",
     } <= ids

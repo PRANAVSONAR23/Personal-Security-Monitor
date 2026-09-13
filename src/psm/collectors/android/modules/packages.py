@@ -15,24 +15,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
 
 from psm.collectors.android.parsers import dumpsys_package, pm_list
+from psm.collectors.base import ModuleResult
 from psm.core.models import CollectionGap
 
 ShellFn = Callable[[str], tuple[int, str, str]]  # (rc, stdout, stderr)
 
 
 @dataclass(slots=True)
-class ModuleResult:
-    entries: list[dict[str, Any]] = field(default_factory=list)
-    gaps: list[CollectionGap] = field(default_factory=list)
-    ok: bool = True
+class PackageResult(ModuleResult):
     dumps: dict[str, str] = field(default_factory=dict)  # pkg -> raw dumpsys text
 
 
-def collect(shell: ShellFn) -> ModuleResult:
-    result = ModuleResult()
+def collect(shell: ShellFn) -> PackageResult:
+    result = PackageResult()
     rc, stdout, stderr = shell("pm list packages -f -i --show-versioncode")
     if rc != 0:
         result.ok = False

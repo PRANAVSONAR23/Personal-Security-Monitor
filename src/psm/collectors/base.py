@@ -20,9 +20,32 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from psm.core.models import CollectionGap, Device, InventoryItem, utcnow_iso
+
+
+@dataclass(slots=True)
+class ModuleResult:
+    """What one collection module returns.
+
+    `ok` is the F1 distinction: a module that ran and found nothing is ok with an
+    empty `entries` list, and its category still counts as collected. A module
+    that could not look sets ok=False, and the category is left out of the
+    snapshot entirely so the diff skips it.
+    """
+
+    entries: list[dict[str, Any]] = field(default_factory=list)
+    gaps: list[CollectionGap] = field(default_factory=list)
+    ok: bool = True
+
+    def gap(self, module: str, reason: str, detail: str = "") -> None:
+        self.gaps.append(CollectionGap(module=module, reason=reason, detail=detail))
+
+    def fail(self, module: str, reason: str, detail: str = "") -> ModuleResult:
+        self.ok = False
+        self.gap(module, reason, detail)
+        return self
 
 
 @dataclass(slots=True)
@@ -44,6 +67,22 @@ class RawBundle:
         """Register a module that could not produce a result. Deliberately does
         NOT add to `collected`, so the diff skips the category."""
         self.gaps.append(CollectionGap(module=module, reason=reason, detail=detail))
+
+
+FileCache = dict[str, tuple[int, int, int, str]]  # path_norm -> (size, mtime_ns, inode, sha256)
+
+
+@runtime_checkable
+class FileCacheAware(Protocol):
+    """A collector that benefits from a persisted (stat -> sha256) cache.
+
+    The controller owns storage: it loads the cache before `collect()` and reads
+    the updated one after. The collector never touches the database, and the
+    controller never interprets the cache contents.
+    """
+
+    def load_file_cache(self, cache: FileCache) -> None: ...
+    def dump_file_cache(self) -> FileCache: ...
 
 
 class CollectionError(Exception):

@@ -1,0 +1,20 @@
+# Only `allowed` counts. TCC auth_value 3/4/5 are limited grants and 0 is a
+# denial; the collector maps all of them, so matching on state avoids v1's
+# bool(auth_value) coercion that treated every non-zero value as a full grant.
+id: new-sensitive-tcc-grant
+severity: alert
+title: "New privacy grant on a sensitive macOS service"
+match:
+  category: permission
+  action: added
+  where:
+    payload.state: "allowed"
+    payload.permission:
+      - "kTCCServiceAccessibility"
+      - "kTCCServiceSystemPolicyAllFiles"
+      - "kTCCServiceScreenCapture"
+      - "kTCCServiceListenEvent"
+      - "kTCCServicePostEvent"
+      - "kTCCServiceMicrophone"
+      - "kTCCServiceCamera"
+      - "kTCCServiceDeveloperTool"

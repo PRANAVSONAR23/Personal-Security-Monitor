@@ -19,7 +19,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from psm.collectors.android.modules.packages import ModuleResult
+from psm.collectors.base import ModuleResult
 from psm.core.models import CollectionGap
 
 ShellFn = Callable[[str], tuple[int, str, str]]

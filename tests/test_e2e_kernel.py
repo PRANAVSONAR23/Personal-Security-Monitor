@@ -171,7 +171,9 @@ def test_browser_extension_all_urls_alerts(db, fake):
                 "browser": "chrome",
                 "id": "abc",
                 "name": "Broad Ext",
-                "permissions": ["tabs", "<all_urls>"],
+                "permissions": ["tabs"],
+                "host_permissions": ["<all_urls>"],
+                "broad_host_access": True,
             }
         ]
     }

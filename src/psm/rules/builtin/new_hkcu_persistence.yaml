@@ -1,8 +1,0 @@
-id: new-hkcu-persistence
-severity: warning
-title: "New user autorun added under HKCU"
-match:
-  category: persistence
-  action: added
-  where:
-    payload.hive: "HKCU"

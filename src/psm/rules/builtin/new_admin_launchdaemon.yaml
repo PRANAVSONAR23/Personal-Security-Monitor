@@ -1,0 +1,11 @@
+# /Library/LaunchDaemons runs as root at boot and needs admin rights to write,
+# so a new entry there is a meaningfully higher bar than a user LaunchAgent.
+id: new-admin-launchdaemon
+severity: alert
+title: "New system-wide LaunchDaemon (runs as root at boot)"
+match:
+  category: persistence
+  action: added
+  where:
+    payload.location: "launchdaemon"
+    payload.scope: ["admin", "system"]

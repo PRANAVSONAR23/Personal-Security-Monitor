@@ -210,16 +210,44 @@ This is a v2.0 spec. `meta.canonical_json_version = 2`.
 ## 3. Subject keys
 
 ```text
-file:<abs-path>                        file:/Users/x/Downloads/a.dmg
-pkg:<bundle-or-package-id>             pkg:com.whatsapp, pkg:com.apple.Safari
-persist:<platform>:<location>:<name>   persist:macos:launchagent:com.foo
-perm:<pkg>:<permission>                perm:com.whatsapp:android.permission.CAMERA
-ext:<browser>:<extension-id>           ext:chrome:elicpjhcidhpjomhibiffojpinpmmpil
-net:listen:<proto>:<port>:<process>
+file:<abs-path>                         file:/Users/x/Downloads/a.dmg
+pkg:<bundle-or-package-id>              pkg:com.whatsapp, pkg:com.apple.Safari
 proc:<path>
-flow:<app-or-uid>:<hostname-or-ip>     flow:com.whatsapp:graph.facebook.com   (NEW)
-find:<analyzer>:<subject-key>          find:yara:file:/Users/x/a.dmg          (NEW)
+net:listen:<proto>:<port>:<process>
+flow:<app-or-uid>:<hostname-or-ip>      flow:com.whatsapp:graph.facebook.com
+find:<analyzer>:<subject-key>           find:yara:file:/Users/x/a.dmg
+
+persistence
+  macos launchd   persist:macos:<location>:<scope>:<name>
+                  persist:macos:launchagent:user:com.foo
+  macos BTM       persist:macos:loginitem:<uid>:<uuid>
+  android         persist:android:<location>:<name>
+
+permission
+  macos TCC       perm:<scope>:<client>:<service>[:<target>]
+                  perm:user:com.desktime.DeskTime:kTCCServiceAppleEvents:com.google.Chrome
+  android         perm:<pkg>:<permission>
+
+browser           ext:<browser>:<profile>:<extension-id>
+                  ext:chrome:Default:elicpjhcidhpjomhibiffojpinpmmpil
 ```
+
+Three of these are wider than the v1 spec, because v1's shapes were not unique:
+
+- **macOS permissions carry scope and target.** TCC's own primary key is
+  `(service, client, client_type, indirect_object_identifier)`. On the
+  development Mac, `perm:<pkg>:<permission>` collided immediately: DeskTime holds
+  two distinct AppleEvents grants, one to drive Brave and one to drive Chrome.
+  Dropping the target silently merges them and one overwrites the other.
+- **macOS persistence carries scope**, so an Apple-shipped
+  `/System/Library` job and a user LaunchAgent with the same label stay distinct,
+  and reports can separate "Apple shipped this" from "something installed this
+  into my account".
+- **Browser extensions carry the profile.** The same extension installed in two
+  Chrome profiles is two installs with independently grantable permissions.
+
+Android keeps `perm:<pkg>:<permission>`: there, that pair genuinely is the
+identity.
 
 ## 4. Interfaces
 

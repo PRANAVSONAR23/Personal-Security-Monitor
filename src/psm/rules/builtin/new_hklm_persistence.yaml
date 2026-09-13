@@ -1,8 +1,0 @@
-id: new-hklm-persistence
-severity: alert
-title: "New system-wide autorun added under HKLM"
-match:
-  category: persistence
-  action: added
-  where:
-    payload.hive: "HKLM"

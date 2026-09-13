@@ -1,0 +1,9 @@
+id: new-user-launchagent
+severity: warning
+title: "New login-scoped LaunchAgent"
+match:
+  category: persistence
+  action: added
+  where:
+    payload.location: "launchagent"
+    payload.scope: "user"

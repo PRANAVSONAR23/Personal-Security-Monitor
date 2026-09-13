@@ -4,8 +4,9 @@ Guidance for Claude Code working in this repository.
 
 ## Project status
 
-**v2 rewrite, in progress on branch `v2/mac-controller`.** Phase 0 (kernel port
-+ v1 defect fixes) is the current milestone. See `TODO.md` for live progress.
+**v2 rewrite, in progress on branch `v2/mac-controller`.** Phases 0 (kernel port
++ v1 defect fixes) and 1 (macOS inventory collector) are complete; Phase 2
+(Android inventory over wireless ADB) is next. See `TODO.md` for live progress.
 
 v1 (branch `main`) was a working Windows-controlled tool — ~4,500 lines, 102
 tests. It is **superseded, not deleted**: its proven core is being ported, its
@@ -68,6 +69,12 @@ recorded gap. Three of v1's six defects were silent-empty bugs.
 **Guard at the smallest unit that can fail.** One malformed plist must not zero
 out a module. Catch broadly per item, narrowly everywhere else.
 
+**Subject keys encode real identity, and it differs per platform.** macOS
+permissions carry scope and target (TCC's primary key includes
+`indirect_object_identifier`); macOS persistence carries scope; browser
+extensions carry the profile. Android permissions stay `perm:<pkg>:<permission>`.
+See LLD §3 — each widening fixed an actual collision on real data.
+
 **Canonical JSON is frozen at v2** (sorted keys, no whitespace, UTF-8, floats
 forbidden). `norm_path` is **platform-aware**: Windows folds and backslashes,
 macOS NFC-normalizes and folds (APFS is case-insensitive), Android NFC-normalizes
@@ -114,7 +121,7 @@ ruff check src/ && ruff format src/
   (v37.0.1) — **not on PATH**, use the full path or export `ANDROID_HOME`
 - `JAVA_HOME=/opt/homebrew/opt/openjdk@17` — needed for the Kotlin agent (Phase 5)
 - `eslogger` present with 104 ESF event types; needs FDA + root, SIP stays enabled
-- Full Disk Access is **not yet granted** — TCC reads currently fail
+- Full Disk Access is **granted to Ghostty** — TCC and browser-profile reads work
 - The filesystem is case-insensitive; `Foo.md` and `foo.md` are the same file
 
 ## What this is NOT

@@ -1,3 +1,6 @@
+# "unknown" is deliberately NOT matched. It means we did not determine the
+# signature, and alerting on our own ignorance is not detection — in v1 every
+# file carried signature_status "unknown", so this rule fired on everything new.
 id: unsigned-binary-user-path
 severity: alert
 title: "New unsigned executable in a user-writable location"
@@ -6,11 +9,11 @@ match:
   action: added
   where:
     payload.executable: true
-    payload.signature_status: ["unsigned", "invalid", "unknown"]
+    payload.signature_status: ["unsigned", "invalid"]
     payload.path:
       prefix_any:
-        - "C:\\Users\\"
-        - "C:\\ProgramData\\"
         - "/Users/"
         - "/usr/local/"
         - "/opt/homebrew/"
+        - "/tmp/"
+        - "/var/tmp/"
