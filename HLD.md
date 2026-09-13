@@ -1,109 +1,131 @@
-# PSM — High-Level Design (HLD)
+# PSM v2 — High-Level Design
 
-## 1. Purpose
-
-Define the modules, their responsibilities, interactions, and the major design decisions, without descending into schemas or function signatures (see LLD.md for those).
-
-## 2. Module Map
+## 1. Module map
 
 ```text
-psm/
-├── cli/            # argument parsing, output rendering
+src/psm/
+├── cli/                 # typer app, rich rendering
 ├── core/
-│   ├── orchestrator.py
-│   ├── models.py        # Device, Snapshot, InventoryItem, Event, Alert
-│   ├── diff.py          # snapshot diff engine
-│   ├── rules.py         # correlation rules (YAML-driven)
-│   └── chain.py         # event hash chain
-├── collectors/
-│   ├── base.py          # Collector interface + capability negotiation
-│   ├── windows/         # in-process: osquery runner + WMI/registry modules:
-│   │                    #   apps, persistence, permissions(limited), files,
-│   │                    #   network, browser, signatures(authenticode), processes
-│   ├── android/         # adb wrapper + modules: packages, permissions,
-│   │                    #   special_access, downloads, processes, netstats
-│   └── macos/           # remote shim transport (ssh/file) + shim script:
-│                        #   apps, persistence(launchd), permissions(TCC),
-│                        #   files, network, browser, signatures(codesign)
-├── normalize/           # raw → canonical items (per platform)
-├── store/               # SQLite access layer, migrations
-├── report/              # scan report, daily report, timeline, explain
-└── enrich/              # local known-good hashes, optional VT hash lookup
+│   ├── models.py        # Device, Snapshot, InventoryItem, Event, Finding, Flow, Alert
+│   ├── diff.py          # PORTED  pure snapshot diff
+│   ├── chain.py         # PORTED  event hash chain
+│   ├── rules.py         # PORTED+ YAML rules, extended to 3 record types
+│   └── tiers.py         # NEW     capability tiers (unrooted / rooted / fda / admin)
+├── collectors/          # poll mode — Adapter
+│   ├── base.py
+│   ├── macos/           # NEW  in-process: apps, launchd, tcc, files, browser
+│   └── android/         # PORTED+ adb: packages, permissions, special_access,
+│                        #         storage, downloads
+├── streams/             # stream mode — Producer                          NEW
+│   ├── base.py          # StreamSource, supervisor, restart + gap recording
+│   ├── esf.py           # macOS: eslogger subscription
+│   └── netflow/
+│       ├── router.py    # leg A: pcap on the Internet Sharing interface
+│       ├── device.py    # leg B: VpnService log pulled over adb
+│       └── correlate.py # join legs on (ts window, destination)
+├── hunt/                # analysis — Strategy                             NEW
+│   ├── base.py          # Analyzer ABC, Artifact, Finding
+│   ├── yara_rules.py
+│   ├── apk.py           # manifest, permissions, signer, dex heuristics
+│   ├── known_good.py    # PORTED
+│   └── vt.py            # PORTED  hash-only, opt-in
+├── normalize/           # raw → canonical
+│   ├── canonical.py     # PORTED  frozen spec
+│   ├── paths.py         # PORTED+ made platform-aware (v1 bug)
+│   ├── macos.py         # NEW
+│   └── android.py       # PORTED
+├── store/               # hand-written SQL, no ORM
+│   ├── db.py            # PORTED+ data dir → ~/Library/Application Support/psm
+│   ├── migrations/
+│   └── queries.py       # PORTED+ new tables
+└── report/              # PORTED  scan, daily, timeline, explain
+
+agent/android-vpn/       # NEW  the on-device VpnService app (Kotlin)
+rules/                   # YAML: detection rules
+yara/                    # YARA rule sets
 ```
 
-## 3. Key Design Decisions
+**Deleted from v1:** `collectors/windows/`, `collectors/macos/transport.py`
+(SSH), `collectors/macos/ingest.py`, `shim/`.
+
+The v1 macOS shim is not ported as a shim — its *collection logic* (launchd
+plist parsing, TCC reads, browser profile parsing, app bundle walking) is lifted
+into `collectors/macos/` as in-process modules. Same knowledge, no JSON round
+trip, testable directly.
+
+## 2. Design decisions
 
 | # | Decision | Rationale |
-|---|----------|-----------|
-| D1 | Snapshot-diff as v1 primitive (no daemons) | Cross-platform uniformity; matches "what changed after X" use case; drastically less platform code |
-| D2 | Python 3.12 on the controller (Windows) | Fast iteration, rich stdlib (sqlite3, hashlib, winreg, subprocess); performance adequate for snapshot workloads |
-| D3 | osquery as the local Windows collection engine | Battle-tested normalization of registry/services/tasks/ports; avoids fragile hand-written Win32 collection; runs in-process now that the controller is Windows |
-| D4 | Agentless Android (ADB from the PC) | No persistent footprint on the phone; honest about non-root limits via capability negotiation |
-| D5 | macOS as a stdlib-only single-file shim over SSH | macOS ships an SSH server (Remote Login) and Python-free delivery is one `scp`+`ssh` away; signature/TCC checks must run on the Mac anyway, so ship results as data |
-| D6 | Capability negotiation per snapshot | Diffs only compare modules present in both snapshots → no false "removed everything" events when access differs |
-| D7 | Append-only, hash-chained events table | Forensic credibility; detects post-hoc DB tampering |
-| D8 | Rules as YAML data, not code | Users extend detection without touching source; rules are auditable |
-| D9 | Content-addressed file records | File hash rows shared across snapshots → DB stays small over many scans |
-| D10 | No listening network service on the controller | Minimizes attack surface; controller always initiates (SSH out, ADB out, local collection) |
+|---|---|---|
+| **D1** | Mac is controller **and** target; collection there is in-process | No transport layer for the device I use most. The v1 SSH shim existed only because the controller was Windows |
+| **D2** | Three subsystems (inventory / hunt / flowlog), one shared store | They answer genuinely different questions with different data models. Merging them would distort all three |
+| **D3** | Two collection modes: **poll** and **stream**. A stream never goes through `diff()` | Continuous telemetry has no "previous snapshot". This is the structural lesson of v1 |
+| **D4** | Hash-chain the conclusions (`events`), not the firehose (`flows`) | `db verify` must stay fast and meaningful. Chaining 10⁶ flows/day protects nothing an attacker would target |
+| **D5** | Capability **tiers**, root-aware from day one | Android modules declare `requires_tier`. Unrooted is the default, complete, supported path; rooted modules slot in without touching the interface |
+| **D6** | `capabilities()` is derived from what *actually collected*, never declared | v1 declared optimistically and emitted 64 phantom "application removed" events in one scan when a module was absent. Reproduced and verified |
+| **D7** | Network capture is **two-legged and correlated** | Router leg gives hostnames with zero phone footprint; device leg gives per-app attribution. Each covers the other's blind spot, and either alone is a valid degraded mode |
+| **D8** | No TLS interception, by default or otherwise | Pinning breaks, privacy stance conflicts. SNI + DNS + metadata is the honest ceiling |
+| **D9** | Hunt findings are **versioned and re-evaluable** | Analyzers improve. `(artifact, analyzer, analyzer_version) → verdict` makes re-running idempotent and the delta meaningful |
+| **D10** | Every finding and alert names its analyzer, rule, and evidence | Explainability is the product. An unexplainable verdict is worse than no verdict |
+| **D11** | macOS kernel telemetry via `eslogger`, SIP stays **enabled** | 104 ESF event types with FDA + root, no Apple entitlement. A real ESF system extension needs provisioning we cannot get |
+| **D12** | Path normalization is **platform-aware** | v1 casefolded every path as Windows, including on case-sensitive macOS. Frozen spec, but the freeze was wrong and this is the moment to fix it |
+| **D13** | Partial collection is normal; a silently empty module is a **bug** | v1's browser module returned 0 extensions while 10 existed, recording no gap. Every module must distinguish "nothing there" from "could not look" |
+| **D14** | No ORM; hand-written SQL | Keeps the schema and the hash chain explicit |
 
-## 4. Primary Use Cases → Flows
+## 3. Capability tiers
 
-### UC1: First-time setup
-`psm device add` → detect/register device → `psm baseline` → full snapshot stored and marked as baseline.
+A tier is a *precondition*, not a platform. Modules declare what they need; the
+collector reports which tiers are currently satisfied.
 
-### UC2: "I clicked something sketchy" (on the Windows PC)
-`psm watch --before-after` → snapshot A → user performs action → keypress → snapshot B → diff(A,B) → report. Highest-value flow; must complete in < ~60s locally.
-
-### UC3: Routine check
-`psm scan [device]` → diff against last snapshot (or baseline with `--against baseline`) → events + alerts → summary. For the Mac: `psm scan mac --ssh user@host` or `psm ingest macos FILE`.
-
-### UC4: Investigation
-`psm timeline --device win --last 7d`, `psm explain <event-id>`, `psm alerts`, `psm timeline export --format jsonl`.
-
-### UC5: Daily report
-Task Scheduler runs `psm scan --quiet && psm report daily` → markdown/text report written to reports dir.
-
-## 5. Collection Scope per Platform (v1)
-
-| Module | Windows (local, osquery+WMI) | macOS (SSH shim) | Android (ADB, non-root) |
+| Tier | Device | How it's satisfied | Unlocks |
 |---|---|---|---|
-| Applications | ✅ programs table, store apps | ✅ /Applications walk + system_profiler | ✅ pm list packages + dumpsys |
-| Persistence | ✅ run keys, services, tasks, startup, WMI subs | ✅ launchd, login items, cron, profiles | ✅ device-admin, accessibility |
-| Permissions | ⚠️ limited (app capabilities) | ✅ TCC.db (needs FDA on Mac) | ✅ per-app grants |
-| Files (high-signal dirs) | ✅ hash walk | ✅ hash walk via shim | ⚠️ shared storage only |
-| Signatures | ✅ Authenticode | ✅ codesign/notarization (runs on Mac) | ⚠️ APK signer only |
-| Network state | ✅ listening_ports, open sockets | ✅ lsof snapshot | ⚠️ dumpsys netstats (coarse) |
-| Browser | ✅ extensions, downloads, history DBs | ✅ same via shim | ❌ v1 |
-| Processes | ✅ processes table | ✅ ps snapshot | ⚠️ partial |
+| `base` | both | always | apps, packages, persistence, permissions, public storage |
+| `fda` | mac | Full Disk Access granted to the terminal | TCC.db, browser profiles, protected paths |
+| `admin` | mac | running as root | `eslogger` ESF stream, pcap on the hotspot interface |
+| `rooted` | phone | root (not currently satisfied, by choice) | other apps' private storage, memory inspection, kernel hooks |
 
-✅ full, ⚠️ partial (recorded as capability), ❌ out of scope.
+`psm doctor` reports which tiers are live and states exactly what each missing
+tier would add — never auto-escalating.
 
-## 6. Event & Severity Model (summary)
+Modules gated behind `rooted` are **declared but unimplemented** in v2. The
+interface is root-aware so the decision can be revisited at Phase 3 without a
+refactor.
 
-Event = (device, ts, category, action, subject_key, before, after, snapshot_pair, severity).
-Severity assigned by rules: `info` (app updated), `notice` (new app), `warning` (new persistence entry), `alert` (correlation hit). Full schema in LLD.
+## 4. Error philosophy
 
-## 7. Error Handling Philosophy
+- **A gap is a first-class record**, not a log line. Every module that fails to
+  produce output records `(module, reason, detail)` and it surfaces in every
+  report that covers that window.
+- **"Empty" and "failed" are different.** A module returning zero items must
+  prove it looked. This was v1's most damaging bug class.
+- **A module failure never aborts a run.** One bad plist must not zero out the
+  persistence module — v1 lost all 471 launchd entries to a single malformed
+  system plist because the guard sat at module level instead of per-item.
+- **Guard at the smallest unit that can fail**, and catch broadly there
+  (`except Exception`), narrowly everywhere else.
+- **Stream sources dying is normal.** MIUI kills background services under
+  memory pressure. The supervisor restarts and records the gap window.
 
-- Partial collection is normal; every gap becomes a `collection_gap` record shown in the report header.
-- Remote collector output is untrusted: schema-validate, size-limit, and timeout everything.
-- The DB is sacred: all writes in transactions; `psm db verify` checks chain + FK integrity.
+## 5. Performance targets
 
-## 8. Performance Targets (v1)
+| Operation | Target |
+|---|---|
+| macOS inventory snapshot (default paths) | < 45 s |
+| Android inventory snapshot over wireless ADB | < 90 s |
+| `diff()` of two 100k-item snapshots | < 5 s |
+| `psm db verify` (chained events only) | < 2 s at 10⁵ events |
+| Flow ingest sustained | ≥ 2k flows/s without drop |
+| Flow storage after rollup | < 50 MB / week |
+| APK analysis (manifest + signer + YARA) | < 3 s per APK |
 
-- Windows full snapshot (default path set): < 60 s, < 500 MB RAM
-- macOS snapshot over SSH (LAN): < 120 s including transfer
-- Android snapshot: < 90 s over USB 2
-- Diff of two 100k-item snapshots: < 5 s
-- DB growth: < 20 MB per routine scan after content-addressing
-
-## 9. Risks
+## 6. Risks
 
 | Risk | Mitigation |
 |---|---|
-| Admin/UAC prompts confuse users; partial data without admin | `psm doctor` explains what elevation adds; capability gaps shown in every report |
-| FDA setup on the Mac is fiddly (granting to sshd-invoked python) | Documented setup path: grant FDA to Terminal + run shim manually once, or use the file-ingest mode; `doctor --ssh` verifies TCC readability |
-| OEM ADB drivers missing on Windows | `psm doctor` detects "unauthorized/offline" states and links driver guidance |
-| dumpsys format drift across Android versions | Version-keyed parsers + golden-file tests per Android release |
-| Snapshot walk too slow on huge dirs | Configurable path set + size cap + mtime-based re-hash skip |
-| Windows Defender flags the tool (hashing walks, osquery) | Code-sign the release later; document exclusion guidance; keep behavior transparent |
+| MIUI kills the VpnService agent | Router leg keeps working independently; supervisor restarts; gap recorded. Document battery-optimization + autostart pinning |
+| ECH / DoH blind the router leg | Degrade to IP+port, record the degradation explicitly. Document Private DNS = off |
+| Wireless ADB drops / re-pair needed | `psm doctor phone` detects and walks through `adb pair`; never silently half-collects |
+| Flow table growth | Retention policy + hourly rollup + `psm db compact` |
+| YARA false positives | Findings are advisory and evidence-bearing; known-good hash suppression; nothing is ever auto-removed |
+| Self-inspection ceiling on the Mac | Documented, not hidden. `eslogger` raises it; nothing removes it |
+| Porting bugs from v1 | The 6 known v1 defects are tracked as explicit Phase 0 fix items with regression tests |

@@ -1,318 +1,375 @@
-# PSM — Low-Level Design (LLD)
+# PSM v2 — Low-Level Design
 
-## 1. SQLite Schema
+## 1. Schema
+
+Ported tables keep their v1 shape where it was right. New tables carry the two
+new subsystems.
+
+### 1.1 Shared (ported from v1)
 
 ```sql
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE devices (
-    id            INTEGER PRIMARY KEY,
-    name          TEXT NOT NULL UNIQUE,
-    platform      TEXT NOT NULL CHECK (platform IN ('windows','macos','android')),
-    identifier    TEXT NOT NULL,            -- hostname / ssh target / adb serial
-    created_at    TEXT NOT NULL,
-    meta          TEXT NOT NULL DEFAULT '{}'
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,            -- 'mac' | 'phone'
+    platform    TEXT NOT NULL CHECK (platform IN ('macos','android')),
+    identifier  TEXT NOT NULL,                   -- 'local' | adb serial / host:port
+    tiers       TEXT NOT NULL DEFAULT '[]',      -- JSON: satisfied tiers at last doctor
+    created_at  TEXT NOT NULL,
+    meta        TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE snapshots (
-    id            INTEGER PRIMARY KEY,
-    device_id     INTEGER NOT NULL REFERENCES devices(id),
-    taken_at      TEXT NOT NULL,
-    kind          TEXT NOT NULL CHECK (kind IN ('baseline','scan','before','after')),
-    capabilities  TEXT NOT NULL,            -- JSON array of collected modules
-    tool_version  TEXT NOT NULL,
-    gaps          TEXT NOT NULL DEFAULT '[]' -- JSON array of collection_gap objects
+    id           INTEGER PRIMARY KEY,
+    device_id    INTEGER NOT NULL REFERENCES devices(id),
+    taken_at     TEXT NOT NULL,
+    kind         TEXT NOT NULL CHECK (kind IN ('baseline','scan','before','after')),
+    capabilities TEXT NOT NULL,                  -- JSON array, DERIVED from collection
+    tool_version TEXT NOT NULL,
+    gaps         TEXT NOT NULL DEFAULT '[]'
 );
 
--- content-addressed inventory payloads (deduped across snapshots)
-CREATE TABLE items (
-    hash          TEXT PRIMARY KEY,          -- sha256 of canonical_json(payload)
-    category      TEXT NOT NULL,             -- file|application|permission|persistence|network|browser|process
-    subject_key   TEXT NOT NULL,             -- stable identity, e.g. "file:C:\Tools\x.exe", "pkg:com.foo.app"
-    payload       TEXT NOT NULL              -- canonical JSON
+CREATE TABLE items (                             -- content-addressed, deduped
+    hash        TEXT PRIMARY KEY,
+    category    TEXT NOT NULL,
+    subject_key TEXT NOT NULL,
+    payload     TEXT NOT NULL
 );
 CREATE INDEX idx_items_subject ON items(category, subject_key);
 
 CREATE TABLE snapshot_items (
-    snapshot_id   INTEGER NOT NULL REFERENCES snapshots(id),
-    item_hash     TEXT    NOT NULL REFERENCES items(hash),
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    item_hash   TEXT    NOT NULL REFERENCES items(hash),
     PRIMARY KEY (snapshot_id, item_hash)
 );
 
-CREATE TABLE events (
+CREATE TABLE events (                            -- CHAINED. conclusions only.
     id            INTEGER PRIMARY KEY,
     device_id     INTEGER NOT NULL REFERENCES devices(id),
     ts            TEXT NOT NULL,
+    source        TEXT NOT NULL                  -- NEW: which subsystem produced it
+                    CHECK (source IN ('inventory','hunt','flowlog','esf')),
     category      TEXT NOT NULL,
-    action        TEXT NOT NULL,             -- added|removed|changed|observed
+    action        TEXT NOT NULL,
     subject_key   TEXT NOT NULL,
     before_hash   TEXT REFERENCES items(hash),
     after_hash    TEXT REFERENCES items(hash),
     snap_from     INTEGER REFERENCES snapshots(id),
-    snap_to       INTEGER NOT NULL REFERENCES snapshots(id),
+    snap_to       INTEGER REFERENCES snapshots(id),
+    ref_id        INTEGER,                       -- NEW: finding.id / flow rollup id
     severity      TEXT NOT NULL DEFAULT 'info'
-                   CHECK (severity IN ('info','notice','warning','alert')),
+                    CHECK (severity IN ('info','notice','warning','alert')),
     prev_row_hash TEXT NOT NULL,
-    row_hash      TEXT NOT NULL UNIQUE       -- sha256(prev_row_hash || canonical_json(event_fields))
+    row_hash      TEXT NOT NULL UNIQUE
 );
 CREATE INDEX idx_events_device_ts ON events(device_id, ts);
-CREATE INDEX idx_events_subject   ON events(subject_key);
+CREATE INDEX idx_events_source    ON events(source, ts);
 
 CREATE TABLE alerts (
-    id            INTEGER PRIMARY KEY,
-    rule_id       TEXT NOT NULL,
-    device_id     INTEGER NOT NULL REFERENCES devices(id),
-    ts            TEXT NOT NULL,
-    title         TEXT NOT NULL,
-    detail        TEXT NOT NULL,             -- JSON: contributing event ids + rendered context
-    status        TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','ack','closed'))
+    id        INTEGER PRIMARY KEY,
+    rule_id   TEXT NOT NULL,
+    device_id INTEGER NOT NULL REFERENCES devices(id),
+    ts        TEXT NOT NULL,
+    title     TEXT NOT NULL,
+    detail    TEXT NOT NULL,
+    status    TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','ack','closed'))
 );
-
 CREATE TABLE alert_events (
-    alert_id  INTEGER NOT NULL REFERENCES alerts(id),
-    event_id  INTEGER NOT NULL REFERENCES events(id),
+    alert_id INTEGER NOT NULL REFERENCES alerts(id),
+    event_id INTEGER NOT NULL REFERENCES events(id),
     PRIMARY KEY (alert_id, event_id)
 );
 
-CREATE TABLE known_good_hashes (
-    sha256   TEXT PRIMARY KEY,
-    source   TEXT NOT NULL,                  -- 'nsrl'|'user'|'os-baseline'
-    label    TEXT
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+```
+
+`snap_to` becomes nullable: hunt and flowlog events have no snapshot pair.
+
+### 1.2 Hunt (new)
+
+```sql
+CREATE TABLE artifacts (                         -- a thing that can be analyzed
+    id          INTEGER PRIMARY KEY,
+    device_id   INTEGER NOT NULL REFERENCES devices(id),
+    kind        TEXT NOT NULL CHECK (kind IN ('file','apk','dylib','script')),
+    subject_key TEXT NOT NULL,                   -- file:/path  |  pkg:com.foo
+    sha256      TEXT,                            -- NULL when oversize/unreadable
+    size        INTEGER,
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL,
+    local_path  TEXT,                            -- staging path for pulled APKs
+    UNIQUE (device_id, subject_key)
 );
+CREATE INDEX idx_artifacts_sha ON artifacts(sha256);
 
-CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);  -- schema_version, chain_head, etc.
+CREATE TABLE findings (                          -- NOT chained: re-evaluable
+    id               INTEGER PRIMARY KEY,
+    artifact_id      INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+    analyzer_id      TEXT NOT NULL,              -- 'yara' | 'apk_signer' | 'vt' | ...
+    analyzer_version TEXT NOT NULL,
+    rule_id          TEXT,                       -- YARA rule / heuristic id
+    verdict          TEXT NOT NULL
+                       CHECK (verdict IN ('clean','suspicious','malicious','unknown')),
+    confidence       TEXT NOT NULL DEFAULT 'medium'
+                       CHECK (confidence IN ('low','medium','high')),
+    evidence         TEXT NOT NULL DEFAULT '{}', -- JSON: what matched, where
+    ts               TEXT NOT NULL,
+    UNIQUE (artifact_id, analyzer_id, analyzer_version, rule_id)
+);
+CREATE INDEX idx_findings_verdict ON findings(verdict, ts);
+
+CREATE TABLE known_good_hashes (
+    sha256 TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    label  TEXT
+);
 ```
 
-### Canonical JSON
-`canonical_json(x)`: UTF-8, sorted keys, no whitespace, floats forbidden (stringify). Used for item hashing and the event chain — must never change once released; version it in `meta.schema_version`. Windows paths are normalized to lowercase drive letter + backslashes before hashing so casing differences don't create phantom changes.
+The `UNIQUE` on findings is what makes re-running idempotent: the same analyzer
+at the same version on the same artifact upserts rather than duplicating.
 
-### Subject key conventions
-```
-file:<abs-path>                       (file:C:\Users\x\Downloads\a.exe, file:/usr/local/bin/x)
-pkg:<bundle-or-package-id>            (Microsoft.WindowsTerminal, com.apple.Safari, com.whatsapp)
-persist:<platform>:<location>:<name>  (persist:windows:runkey:HKCU\...\Run\Foo,
-                                       persist:macos:launchagent:com.foo.bar)
-perm:<pkg>:<permission>
-net:listen:<proto>:<port>:<process>
-ext:<browser>:<extension-id>
-proc:<path>                           (observed processes)
-```
+### 1.3 Flowlog (new)
 
-## 2. Canonical Item Payloads (per category)
+```sql
+CREATE TABLE flows (                             -- raw. high volume. retention-capped.
+    id         INTEGER PRIMARY KEY,
+    device_id  INTEGER NOT NULL REFERENCES devices(id),
+    ts         TEXT NOT NULL,
+    leg        TEXT NOT NULL CHECK (leg IN ('router','device')),
+    proto      TEXT NOT NULL,
+    src_port   INTEGER,
+    dst_ip     TEXT NOT NULL,
+    dst_port   INTEGER NOT NULL,
+    hostname   TEXT,                             -- from DNS or TLS SNI (router leg)
+    sni_status TEXT CHECK (sni_status IN ('plain','ech','none')),
+    app_uid    INTEGER,                          -- device leg only
+    app_pkg    TEXT,                             -- device leg only
+    bytes_out  INTEGER NOT NULL DEFAULT 0,
+    bytes_in   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_flows_ts   ON flows(device_id, ts);
+CREATE INDEX idx_flows_dst  ON flows(dst_ip, ts);
+CREATE INDEX idx_flows_host ON flows(hostname);
 
-```jsonc
-// application
-{ "id": "Microsoft.WindowsTerminal", "name": "Windows Terminal", "version": "1.20",
-  "path": "C:\\Program Files\\WindowsApps\\…", "installed_at": "2026-07-01T10:00:00Z",
-  "signer": "CN=Microsoft Corporation", "signature_status": "valid|invalid|unsigned|notarized",
-  "source": "store|msi|exe|brew|appstore|pkg|sideload|unknown" }
-
-// file
-{ "path": "C:\\Users\\x\\AppData\\Roaming\\bar.exe", "sha256": "…", "size": 812,
-  "mtime": "…", "attrs": "archive", "owner": "x", "executable": true,
-  "signature_status": "unsigned" }
-
-// persistence (windows run key)
-{ "location": "runkey", "hive": "HKCU", "key": "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-  "name": "Foo", "target": "C:\\Users\\x\\AppData\\Roaming\\bar.exe", "args": ["-d"], "enabled": true }
-
-// persistence (macos launch agent)
-{ "location": "launchagent", "name": "com.bar", "target": "/usr/local/bin/bar",
-  "args": ["-d"], "enabled": true, "run_at_load": true }
-
-// permission (android)
-{ "pkg": "com.whatsapp", "permission": "android.permission.CAMERA",
-  "granted": true, "flags": ["user-set"] }
-
-// special access (android, modeled as permission category)
-{ "pkg": "com.foo", "permission": "special:accessibility", "granted": true }
-
-// permission (macos TCC)
-{ "pkg": "com.foo.app", "permission": "kTCCServiceCamera", "granted": true }
-
-// network (listening socket)
-{ "proto": "tcp", "port": 8080, "addr": "0.0.0.0", "process": "C:\\Tools\\bar.exe", "pid_seen": 4242 }
-
-// browser extension
-{ "browser": "chrome", "id": "abcdef…", "name": "Foo Ext", "version": "1.2",
-  "permissions": ["tabs","<all_urls>"], "install_time": "…" }
+CREATE TABLE flow_rollups (                      -- what reports actually query
+    id          INTEGER PRIMARY KEY,
+    device_id   INTEGER NOT NULL REFERENCES devices(id),
+    hour        TEXT NOT NULL,                   -- 'YYYY-MM-DDTHH'
+    app_pkg     TEXT,                            -- NULL = unattributed
+    hostname    TEXT,
+    dst_ip      TEXT,
+    dst_port    INTEGER,
+    flow_count  INTEGER NOT NULL,
+    bytes_out   INTEGER NOT NULL,
+    bytes_in    INTEGER NOT NULL,
+    first_ts    TEXT NOT NULL,
+    last_ts     TEXT NOT NULL,
+    UNIQUE (device_id, hour, app_pkg, hostname, dst_ip, dst_port)
+);
+CREATE INDEX idx_rollup_app  ON flow_rollups(app_pkg, hour);
+CREATE INDEX idx_rollup_host ON flow_rollups(hostname, hour);
 ```
 
-## 3. Collector Interface
+Retention: raw `flows` kept 7 days by default, then dropped after rollup.
+`flow_rollups` kept indefinitely — they're small.
+
+## 2. Canonical JSON — frozen, with one corrected freeze
+
+Unchanged from v1: UTF-8, sorted keys, no whitespace, floats forbidden.
 
 ```python
+def canonical_json(obj) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+```
+
+**Changed — `norm_path` becomes platform-aware.** v1 casefolded every path as a
+Windows path, including on case-sensitive filesystems, which silently conflated
+`/Users/Pranav/x` with `/users/pranav/x` in rule predicates and joins.
+
+```python
+def norm_path(p: str, platform: Platform) -> str:
+    if platform == "windows":                # retained for future Windows target
+        p = p.replace("/", "\\")
+        if len(p) >= 2 and p[1] == ":":
+            p = p[0].upper() + p[1:]
+        return p.casefold()
+    if platform == "macos":                  # APFS default is case-INsensitive
+        return unicodedata.normalize("NFC", p).casefold()
+    return unicodedata.normalize("NFC", p)   # android: case-sensitive, no fold
+```
+
+macOS keeps the casefold (APFS is case-insensitive by default) but gains NFC
+normalization — macOS hands out NFD filenames and unnormalized comparison
+produces phantom diffs on any accented filename. Android is case-sensitive and
+must not fold.
+
+This is a v2.0 spec. `meta.canonical_json_version = 2`.
+
+## 3. Subject keys
+
+```text
+file:<abs-path>                        file:/Users/x/Downloads/a.dmg
+pkg:<bundle-or-package-id>             pkg:com.whatsapp, pkg:com.apple.Safari
+persist:<platform>:<location>:<name>   persist:macos:launchagent:com.foo
+perm:<pkg>:<permission>                perm:com.whatsapp:android.permission.CAMERA
+ext:<browser>:<extension-id>           ext:chrome:elicpjhcidhpjomhibiffojpinpmmpil
+net:listen:<proto>:<port>:<process>
+proc:<path>
+flow:<app-or-uid>:<hostname-or-ip>     flow:com.whatsapp:graph.facebook.com   (NEW)
+find:<analyzer>:<subject-key>          find:yara:file:/Users/x/a.dmg          (NEW)
+```
+
+## 4. Interfaces
+
+```python
+# ---- poll: Adapter ----
 class Collector(ABC):
     platform: str
     ALL_MODULES: tuple[str, ...]
-
-    @abstractmethod
+    def satisfied_tiers(self, device: Device) -> set[str]: ...
     def capabilities(self, device: Device) -> set[str]: ...
-    @abstractmethod
-    def collect(self, device: Device, modules: set[str],
-                timeout_s: int = 300) -> RawBundle: ...
+    def collect(self, device: Device, modules: set[str]) -> RawBundle: ...
 
 @dataclass
 class RawBundle:
     device: Device
-    taken_at: datetime
-    raw: dict[str, bytes | str]      # module name -> raw output
-    gaps: list[CollectionGap]        # module, reason, detail
+    taken_at: str
+    raw: dict[str, list[dict]]       # category -> entries
+    gaps: list[CollectionGap]
+    collected: set[str]              # NEW: what actually produced output (D6)
 
-class Normalizer(ABC):
-    @abstractmethod
-    def normalize(self, bundle: RawBundle) -> list[InventoryItem]: ...
+# ---- stream: Producer ----
+class StreamSource(ABC):
+    kind: str                        # 'esf' | 'netflow'
+    requires_tier: str
+    def subscribe(self, device: Device) -> Iterator[Record]: ...
+    def health(self) -> SourceHealth: ...
+
+# ---- hunt: Strategy ----
+class Analyzer(ABC):
+    id: str
+    version: str
+    accepts: tuple[str, ...]         # artifact kinds
+    def analyze(self, artifact: Artifact) -> list[Finding]: ...
 ```
 
-### Windows module mechanisms (v1, local in-process)
-| module | mechanism |
-|---|---|
-| apps | osquery `programs`; `Get-AppxPackage` for store apps |
-| persistence | osquery `registry` (Run/RunOnce for HKLM+HKCU), `services`, `scheduled_tasks`, `startup_items`; WMI `__EventFilter`/`CommandLineEventConsumer` via osquery `wmi_*` tables |
-| permissions | Appx capabilities (limited); recorded as partial capability |
-| files | hash-walk configured path set (default: Downloads, %APPDATA%, %LOCALAPPDATA%\Temp exclusions applied, %USERPROFILE%\Desktop, C:\Tools) with size cap 200 MB, skip re-hash when (size, mtime, file_id) unchanged |
-| signatures | osquery `authenticode` on new/changed executables only |
-| network | osquery `listening_ports` + `process_open_sockets` snapshot (metadata only) |
-| browser | copy-then-read Chrome/Edge/Firefox profile files (extensions, downloads) |
-| processes | osquery `processes` |
+`RawBundle.collected` is the D6 fix: the snapshot's `capabilities` column is
+written from this set, never from a declared constant.
 
-Elevation: run elevated for full HKLM/services/tasks coverage; unelevated runs record `collection_gap("persistence", "not-elevated")` for the affected hives.
+## 5. Diff — unchanged
 
-### macOS shim (v1, remote)
-Single file `psm_mac_collector.py`, **stdlib-only**, compatible with macOS system Python3 (or bundled via `python3` from CLT). Invocation modes:
-- SSH: `psm scan mac --ssh user@host` → controller runs `ssh user@host 'python3 -' < psm_mac_collector.py --modules …` and reads JSON from stdout. Uses macOS built-in Remote Login; controller never listens.
-- Manual: user runs the shim on the Mac, gets `psm-mac-<host>-<ts>.json`, transfers it, `psm ingest macos FILE`.
-
-| module | mechanism (runs on the Mac) |
-|---|---|
-| apps | walk /Applications + ~/Applications; `system_profiler SPApplicationsDataType -json` |
-| persistence | plistlib over LaunchAgents/LaunchDaemons dirs, `launchctl list`, login items, `crontab -l`, `profiles list` |
-| permissions | copy-then-read TCC.db (system + user) — requires FDA for the invoking process |
-| files | hash-walk (~/Downloads, ~/Library/LaunchAgents, /usr/local/bin, /opt/homebrew/bin), same skip-cache rules |
-| signatures | `codesign -dv --verbose=2`, `spctl -a -vv` on new/changed executables — must run on the Mac; results shipped as data |
-| network | `lsof -i -nP` snapshot |
-| browser | copy-then-read Chrome/Safari/Firefox profile stores |
-| processes | `ps axo pid,ppid,uid,lstart,command` |
-
-Shim output schema = same envelope as any RawBundle:
-```json
-{ "psm_collector": "macos", "version": "1.0", "host": "…", "taken_at": "…",
-  "modules": { "apps": [...], "persistence": [...], ... }, "gaps": [...] }
-```
-
-### Android module commands (v1, non-root, adb.exe from the PC)
-| module | mechanism |
-|---|---|
-| packages | `pm list packages -f -i --show-versioncode`; `dumpsys package <pkg>` (version-keyed parser) |
-| permissions | `dumpsys package` grants section |
-| special_access | `settings get secure enabled_accessibility_services`; `dpm list-owners`; `dumpsys device_policy` |
-| downloads | `ls -l` on /sdcard/Download + content query where permitted |
-| processes | `ps -A` (limited visibility) |
-| netstats | `dumpsys netstats` per-uid summary |
-
-`psm doctor` additionally detects `unauthorized`/`offline` ADB states (common on Windows when the OEM USB driver is missing) and prints driver guidance.
-
-## 4. Diff Algorithm
-
-```
-diff(snapA, snapB):
-    shared = capabilities(A) ∩ capabilities(B)
+```text
+diff(A, B):
+    shared = A.capabilities ∩ B.capabilities
     for category in shared:
-        A_map = {subject_key: item_hash} from snapshot_items(A, category)
-        B_map = same for B
-        added   = B_map.keys - A_map.keys      → Event(action=added,  after=B)
-        removed = A_map.keys - B_map.keys      → Event(action=removed, before=A)
-        changed = keys where hash differs      → Event(action=changed, before=A, after=B)
-                  + attribute-level delta computed lazily for display
-    modules only in one snapshot → collection-scope note, NOT events
+        added   = B.keys - A.keys
+        removed = A.keys - B.keys
+        changed = keys in both where item_hash differs
+    categories in only one snapshot → scope note, NEVER an event
 ```
-Pure function; unit-tested with golden snapshot pairs.
 
-## 5. Rules Engine
+Pure function. Ported as-is; it was correct.
 
-Rules are YAML, evaluated over the event batch of one diff:
+## 6. Hash chain — unchanged, narrower input
+
+```text
+row_hash = sha256(prev_row_hash ‖ canonical_json(event_core_fields))
+```
+
+Core fields gain `source` and `ref_id`. Batch ordered by
+`(source, category, subject_key)` for determinism. `psm db verify` walks
+`events` only — findings and flows are outside the chain by design (D4).
+
+## 7. Rules engine
+
+Ported predicate set (`eq`, `in`, `prefix_any`, `has_any`, `exists`) plus the
+restricted `a.X == b.Y` join. Two extensions:
 
 ```yaml
-- id: unsigned-binary-user-path
-  severity: alert
-  title: "New unsigned executable in user-writable location"
+# over flows
+- id: new-host-for-app
+  severity: warning
+  title: "App contacted a host it has never contacted before"
   match:
-    category: file
-    action: added
+    source: flowlog
     where:
-      payload.executable: true
-      payload.signature_status: ["unsigned", "invalid"]
-      payload.path: { prefix_any: ["C:\\Users\\", "/Users/", "/usr/local/", "/opt/homebrew/"] }
+      flow.first_contact: true
+      flow.app_pkg: { exists: true }
 
-- id: persistence-plus-new-file
+# over findings
+- id: yara-hit-on-new-apk
   severity: alert
-  title: "New persistence entry targets a file created in the same scan"
+  title: "YARA rule matched a newly installed APK"
   correlate:
-    a: { category: persistence, action: added }
-    b: { category: file, action: added }
-    join: a.payload.target == b.payload.path
+    a: { source: hunt,      where: { finding.verdict: ["suspicious","malicious"] } }
+    b: { source: inventory, category: application, action: added }
+    join: a.artifact.subject_key == b.subject_key
 ```
 
-Engine: filter-match per rule (`match`) and pairwise join (`correlate`) within a single event batch only (no cross-scan correlation in v1). Path comparisons use the same normalization as subject keys, so Windows casing never breaks a join.
+Path predicates route through the platform-aware `norm_path`, using the
+**event's device platform** rather than a hardcoded one.
 
-## 6. Hash Chain
+## 8. CLI
 
-```
-head = meta['chain_head'] or GENESIS
-for each event insert (single transaction, ordered):
-    row_hash = sha256(head + canonical_json(event_core_fields))
-    event.prev_row_hash, event.row_hash = head, row_hash
-    head = row_hash
-meta['chain_head'] = head
-```
-`psm db verify` recomputes from genesis; O(n), acceptable for personal volumes.
+```text
+psm device add|list|remove
+psm doctor [DEVICE]              # tiers satisfied, what each missing tier adds
 
-## 7. CLI Specification
-
-```
-psm device add [--platform windows|macos|android] [--name NAME] [--ssh user@host]
-psm device list
-psm doctor [DEVICE]                # checks elevation, adb+drivers, ssh reachability, Mac FDA
+# inventory
 psm baseline [DEVICE]
-psm scan [DEVICE] [--against baseline|last] [--modules m1,m2] [--json] [--enrich vt]
-         [--ssh user@host]         # macOS remote collection
-psm watch --before-after [DEVICE]  # snapshot, wait for keypress, snapshot, diff
-psm ingest macos FILE              # manual shim-output ingestion
+psm scan [DEVICE] [--against baseline|last] [--modules m1,m2] [--json]
+psm watch --before-after [DEVICE]        # snapshot → keypress → snapshot → diff
 psm persistence [DEVICE] [--diff]
-psm timeline [--device D] [--last 7d] [--category c] [--export jsonl PATH]
-psm report daily [--out DIR]
+
+# hunt
+psm hunt [DEVICE] [--new|--all] [--analyzers yara,apk,vt] [--pull-apks]
+psm hunt findings [--verdict malicious] [--since 7d]
+psm hunt rescan                  # re-run updated analyzers over known artifacts
+
+# flowlog
+psm flow start|stop|status       # supervise the capture legs
+psm flow top [--last 24h] [--by app|host]
+psm flow app <pkg> [--last 7d]
+psm flow host <hostname>
+psm flow export [--format jsonl] PATH
+
+# shared
+psm timeline [--device D] [--last 7d] [--source inventory|hunt|flowlog|esf]
 psm explain EVENT_ID
-psm alerts [--open|--ack ID|--close ID]
-psm db verify | vacuum | export [--signed]
+psm alerts [--status open] [--ack ID] [--close ID]
+psm report daily [--out DIR]
+psm db verify | compact | vacuum
 ```
 
-Exit codes: 0 clean, 1 error, 2 scan completed with warnings, 3 scan produced alerts (scriptable — usable from Task Scheduler).
+Exit codes: `0` clean · `1` error · `2` warnings/gaps · `3` alerts.
 
-## 8. Explain Templates
+## 9. Paths
 
-Per (category, action) pair, a template with slot-filled payload values + static context, e.g. persistence/added (runkey) → what Run keys are, why an entry in HKCU pointing at %APPDATA% matters, suggested verification steps. Stored as markdown files in `explain/`, selectable by locale later.
-
-## 9. Configuration (`config.yaml` in %LOCALAPPDATA%\psm\)
-
-```yaml
-paths:
-  windows_hash_walk: ["%USERPROFILE%\\Downloads", "%APPDATA%", "%USERPROFILE%\\Desktop"]
-  macos_hash_walk: ["~/Downloads", "~/Library/LaunchAgents", "/usr/local/bin", "/opt/homebrew/bin"]
-  max_file_size_mb: 200
-scan:
-  timeout_s: 300
-ssh:
-  mac_target: "pranav@macbook.local"    # default for `psm scan mac`
-enrich:
-  vt_api_key: null          # hash-only lookups, opt-in per run
-report:
-  out_dir: "%LOCALAPPDATA%\\psm\\reports"
+```text
+~/Library/Application Support/psm/
+├── psm.sqlite
+├── config.yaml
+├── rules/            # user YAML rules (builtin ship in-package)
+├── yara/             # user YARA rules
+├── staging/          # pulled APKs awaiting analysis
+├── reports/
+└── logs/
 ```
 
-## 10. Testing Strategy
+## 10. Testing strategy
 
-- Golden-file tests per normalizer: recorded raw output (osquery rows, dumpsys per Android version, shim JSON) → expected items.
-- Property test on diff: diff(A,A) == ∅; diff symmetry of added/removed.
-- Chain test: mutate any event row → verify fails.
-- Shim contract test: `psm_mac_collector.py` output validates against `collector.schema.json` on every CI run (macOS runner).
-- End-to-end on Windows in CI (self-scan of a fixture directory tree).
+- **Golden files per normalizer** — recorded `dumpsys` per Android version,
+  recorded macOS plist/TCC/Preferences fixtures → expected items.
+- **Property tests on diff** — `diff(A,A) == ∅`; added/removed symmetry.
+- **Chain tests** — mutate any event row, `verify` must fail at that id.
+- **Regression tests for every v1 defect** — see PLAN Phase 0. Each of the six
+  gets a named test that fails against the v1 behaviour.
+- **Capability-derivation test** — collect with a module absent, assert zero
+  phantom `removed` events (the D6 reproduction).
+- **Per-item guard test** — one malformed plist in a directory of valid ones
+  must yield N-1 items plus one gap, never zero items.
+- **Flow correlation test** — synthetic router + device flows, assert the join
+  attributes correctly and that unmatched flows survive as unattributed.
+- **Fuzz** — hostile input to the VPN agent's log parser and the pcap decoder.
