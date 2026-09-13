@@ -1,35 +1,30 @@
-"""Orchestrator — device resolution, snapshot lifecycle, diff wiring."""
+"""Orchestrator — device resolution, snapshot lifecycle, diff wiring.
+
+Poll mode only. Stream sources (netflow, ESF) have their own supervisor and never
+pass through here — a stream has no previous snapshot to diff against (HLD D3).
+"""
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from psm import __version__
-from psm.collectors.android.collector import AndroidCollector, AndroidConfig
 from psm.collectors.base import Collector, Normalizer
-from psm.collectors.macos.collector import MacosCollector, MacosConfig
-from psm.collectors.windows.collector import WindowsCollector, WindowsConfig
-from psm.collectors.windows.modules.files import CacheMap
 from psm.core.chain import append_events
 from psm.core.diff import diff
 from psm.core.models import Alert, Device, Event, Snapshot, utcnow_iso
 from psm.core.rules import AlertIntent, Rule, load_builtin_rules
 from psm.core.rules import evaluate as evaluate_rules
 from psm.enrich.known_good import bulk_lookup as known_good_lookup
-from psm.normalize.android import AndroidNormalizer
-from psm.normalize.macos import MacosNormalizer
-from psm.normalize.windows import WindowsNormalizer
 from psm.store.db import transaction
 from psm.store.queries import (
     insert_alert,
     insert_snapshot,
-    load_file_hash_cache,
     load_item_payload,
     load_snapshot,
     load_snapshot_index,
-    save_file_hash_cache,
 )
 
 
@@ -45,24 +40,22 @@ class SnapshotResult:
     alerts: list[Alert] = field(default_factory=list)
 
 
-def _select_collector_and_normalizer(
-    device: Device,
-    file_walk_paths: tuple[str, ...],
-    prior_cache: CacheMap,
-    android_config: AndroidConfig | None = None,
-    macos_config: MacosConfig | None = None,
-    windows_config: WindowsConfig | None = None,
-) -> tuple[Collector, Normalizer, WindowsConfig | None]:
-    if device.platform == "windows":
-        cfg = windows_config or WindowsConfig()
-        cfg.file_walk_paths = cfg.file_walk_paths or file_walk_paths
-        cfg.prior_file_cache = cfg.prior_file_cache or prior_cache
-        return WindowsCollector(cfg), WindowsNormalizer(), cfg
-    if device.platform == "android":
-        return AndroidCollector(android_config or AndroidConfig()), AndroidNormalizer(), None
-    if device.platform == "macos":
-        return MacosCollector(macos_config or MacosConfig()), MacosNormalizer(), None
-    raise OrchestratorError(f"platform not implemented: {device.platform}")
+class CollectorFactory(Protocol):
+    def __call__(self, **kwargs: Any) -> tuple[Collector, Normalizer]: ...
+
+
+_REGISTRY: dict[str, CollectorFactory] = {}
+
+
+def register(platform: str, factory: CollectorFactory) -> None:
+    _REGISTRY[platform] = factory
+
+
+def _resolve(device: Device, **kwargs: Any) -> tuple[Collector, Normalizer]:
+    factory = _REGISTRY.get(device.platform)
+    if factory is None:
+        raise OrchestratorError(f"no collector registered for platform {device.platform!r}")
+    return factory(**kwargs)
 
 
 def take_snapshot(
@@ -70,32 +63,29 @@ def take_snapshot(
     device: Device,
     *,
     kind: str,
-    file_walk_paths: tuple[str, ...] = (),
     modules: set[str] | None = None,
     rules: list[Rule] | None = None,
-    android_config: AndroidConfig | None = None,
-    macos_config: MacosConfig | None = None,
-    windows_config: WindowsConfig | None = None,
     suppress_known_good: bool = False,
+    **collector_kwargs: Any,
 ) -> SnapshotResult:
-    """Collect + normalize + persist. For 'scan' kinds, also diff, evaluate rules, alert."""
+    """Collect + normalize + persist. For non-baseline kinds, also diff and alert."""
     if device.id is None:
         raise OrchestratorError("device must be persisted before taking a snapshot")
 
-    prior_cache = load_file_hash_cache(conn, device.id) if file_walk_paths else {}
-    collector, normalizer, cfg = _select_collector_and_normalizer(
-        device, file_walk_paths, prior_cache, android_config, macos_config, windows_config
-    )
+    collector, normalizer = _resolve(device, **collector_kwargs)
 
-    caps = collector.capabilities(device)
-    target = (modules or caps) & caps
+    planned = collector.capabilities(device)
+    target = (modules & planned) if modules else planned
     bundle = collector.collect(device, target)
     items = normalizer.normalize(bundle)
 
+    # F1: the stored capability set is what actually collected, never what was
+    # planned or declared. A module that failed is absent here, so the diff skips
+    # its category instead of reporting every item in it as removed.
     snapshot = Snapshot(
         device_id=device.id,
         kind=kind,  # type: ignore[arg-type]
-        capabilities=target,
+        capabilities=set(bundle.collected),
         tool_version=__version__,
         taken_at=bundle.taken_at,
         gaps=bundle.gaps,
@@ -108,8 +98,6 @@ def take_snapshot(
 
     with transaction(conn):
         insert_snapshot(conn, snapshot, items)
-        if cfg is not None and cfg.new_file_cache is not None:
-            save_file_hash_cache(conn, device.id, cfg.new_file_cache)
 
         if kind != "baseline":
             prior_id = _previous_snapshot_id(conn, device.id, snapshot.id)
@@ -120,30 +108,25 @@ def take_snapshot(
                 idx_b = load_snapshot_index(conn, snapshot.id)
                 events = diff(prior_snap, idx_a, snapshot, idx_b)
 
-                alert_intents = evaluate_rules(
-                    active_rules, events, _payload_resolver(conn)
+                intents = evaluate_rules(
+                    active_rules, events, _payload_resolver(conn), device.platform
                 )
                 if suppress_known_good:
-                    alert_intents = _drop_known_good_intents(conn, alert_intents)
+                    intents = _drop_known_good_intents(conn, intents)
                 if events:
-                    append_events(conn, events)  # events now carry rule-upgraded severity
-                for intent in alert_intents:
-                    contributing_ids = [
-                        e.id for e in intent.contributing_events if e.id is not None
-                    ]
-                    if len(contributing_ids) != len(intent.contributing_events):
+                    append_events(conn, events)
+                for intent in intents:
+                    ids = [e.id for e in intent.contributing_events if e.id is not None]
+                    if len(ids) != len(intent.contributing_events):
                         continue
                     alert = Alert(
                         rule_id=intent.rule_id,
                         device_id=device.id,
                         title=intent.title,
-                        detail={
-                            "events": contributing_ids,
-                            "context": intent.context,
-                        },
+                        detail={"events": ids, "context": intent.context},
                         ts=utcnow_iso(),
                     )
-                    insert_alert(conn, alert, contributing_ids)
+                    insert_alert(conn, alert, ids)
                     alerts.append(alert)
 
     return SnapshotResult(
@@ -167,26 +150,21 @@ def _drop_known_good_intents(
     """Drop intents whose every contributing file-event points at a known-good hash.
 
     Non-file events are never suppressed — the allowlist is a hash concept only.
-    An intent with a mix of file + non-file events isn't suppressed either: the
-    non-file event still tells a story worth alerting on.
+    A mixed intent survives: the non-file event still tells a story worth alerting on.
     """
     if not intents:
         return intents
     hashes: set[str] = set()
-    file_events = [
-        e
-        for intent in intents
-        for e in intent.contributing_events
-        if e.category == "file"
-    ]
-    for e in file_events:
-        candidate = e.after_hash if e.action != "removed" else e.before_hash
-        if not candidate:
-            continue
-        payload = load_item_payload(conn, candidate) or {}
-        sha = payload.get("sha256")
-        if isinstance(sha, str):
-            hashes.add(sha.lower())
+    for intent in intents:
+        for e in intent.contributing_events:
+            if e.category != "file":
+                continue
+            candidate = e.after_hash if e.action != "removed" else e.before_hash
+            if not candidate:
+                continue
+            sha = (load_item_payload(conn, candidate) or {}).get("sha256")
+            if isinstance(sha, str):
+                hashes.add(sha.lower())
     if not hashes:
         return intents
 
@@ -202,8 +180,7 @@ def _drop_known_good_intents(
             candidate = e.after_hash if e.action != "removed" else e.before_hash
             if not candidate:
                 return False
-            payload = load_item_payload(conn, candidate) or {}
-            sha = payload.get("sha256")
+            sha = (load_item_payload(conn, candidate) or {}).get("sha256")
             if not isinstance(sha, str) or sha.lower() not in known:
                 return False
         return True

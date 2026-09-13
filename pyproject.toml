@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "psm"
-version = "0.1.0"
-description = "Personal Security Monitor — snapshot-diff forensic inspection for Windows, macOS, and Android."
+version = "2.0.0.dev0"
+description = "Personal Security Monitor — inventory diffing, artifact hunting, and network flow logging for a Mac and an Android phone."
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Pranav Sonar" }]
@@ -31,7 +31,7 @@ psm = "psm.cli.app:main"
 packages = ["src/psm"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/psm", "shim/", "pyproject.toml"]
+include = ["src/psm", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 100
@@ -57,7 +57,6 @@ files = [
     "src/psm/core",
     "src/psm/store",
     "src/psm/normalize",
-    "src/psm/collectors/android",
-    "src/psm/collectors/macos",
+    "src/psm/collectors",
     "src/psm/enrich",
 ]

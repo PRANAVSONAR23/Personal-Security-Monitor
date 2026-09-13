@@ -49,7 +49,4 @@ def render(category: str, action: str, payload: dict[str, Any]) -> str:
             template = path.read_text(encoding="utf-8")
             view = _payload_view(payload)
             return template.format_map(_SafeMap(view))
-    return (
-        f"# {category} {action}\n\n"
-        f"(no explanation template shipped for this event type yet)\n"
-    )
+    return f"# {category} {action}\n\n(no explanation template shipped for this event type yet)\n"

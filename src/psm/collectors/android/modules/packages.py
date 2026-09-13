@@ -1,17 +1,20 @@
-"""Packages module — `pm list packages` + per-package `dumpsys package`.
+"""Packages module — `pm list packages` plus one `dumpsys package` per package.
 
-Emits `application` items keyed by `pkg:<package-id>`. Extra fields (permissions,
-installer) are attached to the payload so the rules engine can join on them without a
-second lookup.
+Emits `application` items keyed by `pkg:<package-id>` and hands the captured
+dumpsys text back so the permission module can parse it without shelling out
+again. v1 ran `dumpsys package <pkg>` twice for every package — once here and
+once in `collect_permissions` — roughly 400 ADB round trips for a 200-app phone,
+which blows the 90 s budget over wireless on its own.
 
-Failure model: pm list failure = fatal for this module (gap 'pm-failed'). Individual
-dumpsys failures degrade a single package (still emitted with less metadata).
+Failure model: `pm list` failing is fatal for the module (`ok=False`, the whole
+category is skipped by the diff). An individual `dumpsys` failing degrades that
+one package, which is still emitted with less metadata.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from psm.collectors.android.parsers import dumpsys_package, pm_list
@@ -21,37 +24,31 @@ ShellFn = Callable[[str], tuple[int, str, str]]  # (rc, stdout, stderr)
 
 
 @dataclass(slots=True)
-class PackageEntry:
-    id: str
-    name: str
-    version: str | None
-    installer: str | None
-    source: str
-    apk_path: str
-    installed_at: str | None
-    last_update_time: str | None
-    app_id: int | None
-    version_code: int | None
+class ModuleResult:
+    entries: list[dict[str, Any]] = field(default_factory=list)
+    gaps: list[CollectionGap] = field(default_factory=list)
+    ok: bool = True
+    dumps: dict[str, str] = field(default_factory=dict)  # pkg -> raw dumpsys text
 
 
-def collect(shell: ShellFn) -> tuple[list[dict[str, Any]], list[CollectionGap]]:
-    gaps: list[CollectionGap] = []
+def collect(shell: ShellFn) -> ModuleResult:
+    result = ModuleResult()
     rc, stdout, stderr = shell("pm list packages -f -i --show-versioncode")
     if rc != 0:
-        return [], [CollectionGap("packages", "pm-failed", stderr.strip()[:200])]
+        result.ok = False
+        result.gaps.append(CollectionGap("packages", "pm-failed", stderr.strip()[:200]))
+        return result
 
-    pm_entries = pm_list.parse(stdout)
-    packages: list[dict[str, Any]] = []
-
-    for pm_entry in pm_entries:
+    for pm_entry in pm_list.parse(stdout):
         source = pm_list.classify_installer(pm_entry.installer)
 
         dumped: dumpsys_package.DumpsysPackage | None = None
         rc2, dump_stdout, dump_stderr = shell(f"dumpsys package {pm_entry.pkg}")
         if rc2 == 0:
+            result.dumps[pm_entry.pkg] = dump_stdout
             dumped = dumpsys_package.parse(dump_stdout)
         else:
-            gaps.append(
+            result.gaps.append(
                 CollectionGap(
                     "packages",
                     "dumpsys-failed",
@@ -59,10 +56,10 @@ def collect(shell: ShellFn) -> tuple[list[dict[str, Any]], list[CollectionGap]]:
                 )
             )
 
-        packages.append(
+        result.entries.append(
             {
                 "id": pm_entry.pkg,
-                "name": pm_entry.pkg,  # display name comes from labels later; pkg id is the id
+                "name": pm_entry.pkg,
                 "version": dumped.version_name if dumped else None,
                 "version_code": pm_entry.version_code,
                 "installer": pm_entry.installer,
@@ -74,36 +71,24 @@ def collect(shell: ShellFn) -> tuple[list[dict[str, Any]], list[CollectionGap]]:
             }
         )
 
-    return packages, gaps
+    return result
 
 
-def collect_permissions(
-    shell: ShellFn, packages: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], list[CollectionGap]]:
-    """Second pass — one `dumpsys package <pkg>` per package to pull runtime perms.
+def collect_permissions(dumps: dict[str, str]) -> ModuleResult:
+    """Parse runtime permissions out of dumpsys text already captured by collect().
 
-    Split out from `collect()` because permissions and packages become different
-    inventory categories with different subject-key schemes.
+    Pure function of that text — no shell access, so it cannot fail at the ADB
+    level. An empty `dumps` means the packages module did not run; the caller
+    decides whether that is a gap.
     """
-    perms: list[dict[str, Any]] = []
-    gaps: list[CollectionGap] = []
-    for entry in packages:
-        pkg = entry["id"]
-        rc, stdout, stderr = shell(f"dumpsys package {pkg}")
-        if rc != 0:
-            gaps.append(
-                CollectionGap(
-                    "permissions",
-                    "dumpsys-failed",
-                    f"{pkg}: {stderr.strip()[:120]}",
-                )
-            )
-            continue
-        dumped = dumpsys_package.parse(stdout)
+    result = ModuleResult()
+    for pkg, text in dumps.items():
+        dumped = dumpsys_package.parse(text)
         if dumped is None:
+            result.gaps.append(CollectionGap("permissions", "dumpsys-unparseable", pkg))
             continue
         for runtime in dumped.runtime_permissions:
-            perms.append(
+            result.entries.append(
                 {
                     "pkg": pkg,
                     "permission": runtime.permission,
@@ -111,4 +96,4 @@ def collect_permissions(
                     "flags": list(runtime.flags),
                 }
             )
-    return perms, gaps
+    return result

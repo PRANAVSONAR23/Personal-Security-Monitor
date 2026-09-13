@@ -32,7 +32,7 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # VT file-info responses are tiny — cap 
 @dataclass(slots=True)
 class VtVerdict:
     sha256: str
-    known: bool                    # False → VT has never seen this hash (404)
+    known: bool  # False → VT has never seen this hash (404)
     malicious: int = 0
     suspicious: int = 0
     harmless: int = 0

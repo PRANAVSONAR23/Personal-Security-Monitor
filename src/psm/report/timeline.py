@@ -36,8 +36,9 @@ def render_timeline(console: Console, rows: list[dict[str, Any]]) -> None:
         console.print("[dim]no events in the requested window[/dim]")
         return
 
-    table = Table(title=f"timeline ({len(rows)} event{'s' if len(rows) != 1 else ''})",
-                  header_style="bold")
+    table = Table(
+        title=f"timeline ({len(rows)} event{'s' if len(rows) != 1 else ''})", header_style="bold"
+    )
     table.add_column("id", width=6)
     table.add_column("ts")
     table.add_column("category", width=12)

@@ -23,7 +23,7 @@ def test_migration_applies_once(db):
 def test_meta_bootstrapped(db):
     assert int(get_meta(db, "schema_version") or "0") >= 1
     assert get_meta(db, "chain_head") == ""
-    assert get_meta(db, "canonical_json_version") == "1"
+    assert get_meta(db, "canonical_json_version") == "2"
 
 
 def test_meta_upsert(db):
@@ -34,17 +34,17 @@ def test_meta_upsert(db):
 
 
 def test_device_roundtrip(db):
-    d = Device(name="pc", platform="windows", identifier="localhost")
+    d = Device(name="pc", platform="macos", identifier="localhost")
     insert_device(db, d)
     assert d.id is not None
     loaded = get_device_by_name(db, "pc")
     assert loaded is not None
-    assert loaded.platform == "windows"
+    assert loaded.platform == "macos"
     assert loaded.identifier == "localhost"
 
 
 def test_snapshot_with_items_roundtrip(db):
-    d = Device(name="pc", platform="windows", identifier="localhost")
+    d = Device(name="pc", platform="macos", identifier="localhost")
     insert_device(db, d)
     assert d.id is not None
     snap = Snapshot(
@@ -81,7 +81,7 @@ def test_snapshot_with_items_roundtrip(db):
 
 
 def test_items_dedup_across_snapshots(db):
-    d = Device(name="pc", platform="windows", identifier="localhost")
+    d = Device(name="pc", platform="macos", identifier="localhost")
     insert_device(db, d)
     assert d.id is not None
     payload = {"path": "C:\\Tools\\a.exe", "sha256": "aaa"}

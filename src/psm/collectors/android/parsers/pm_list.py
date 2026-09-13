@@ -49,8 +49,8 @@ def parse(text: str) -> list[PmListEntry]:
 
 # Well-known installer package IDs → source label used for rules and reporting.
 _STORE_INSTALLERS = {
-    "com.android.vending": "store",   # Google Play
-    "com.amazon.venezia": "store",    # Amazon Appstore
+    "com.android.vending": "store",  # Google Play
+    "com.amazon.venezia": "store",  # Amazon Appstore
     "com.sec.android.app.samsungapps": "store",  # Samsung Galaxy Store
     "com.huawei.appmarket": "store",
     "com.xiaomi.mipicks": "store",

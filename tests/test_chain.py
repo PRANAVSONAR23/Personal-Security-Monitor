@@ -7,7 +7,7 @@ from psm.store.queries import get_meta, insert_device, insert_snapshot
 
 
 def _seed(db) -> tuple[Device, Snapshot, Snapshot]:
-    d = Device(name="pc", platform="windows", identifier="localhost")
+    d = Device(name="pc", platform="macos", identifier="localhost")
     insert_device(db, d)
     assert d.id is not None
     a = Snapshot(device_id=d.id, kind="baseline", capabilities={"file"}, tool_version="0.1.0")

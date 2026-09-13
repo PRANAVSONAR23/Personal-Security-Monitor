@@ -14,7 +14,7 @@ from psm.store.queries import (
 
 
 def test_synthetic_snapshot_diff(db):
-    d = Device(name="pc", platform="windows", identifier="localhost")
+    d = Device(name="pc", platform="macos", identifier="localhost")
     insert_device(db, d)
     assert d.id is not None
 

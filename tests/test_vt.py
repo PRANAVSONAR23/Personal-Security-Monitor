@@ -44,18 +44,18 @@ class _FakeOpener:
 
 
 def _stats_body(stats: dict[str, int]) -> bytes:
-    return json.dumps({
-        "data": {"attributes": {"last_analysis_stats": stats}}
-    }).encode("utf-8")
+    return json.dumps({"data": {"attributes": {"last_analysis_stats": stats}}}).encode("utf-8")
 
 
 def test_lookup_parses_malicious_count() -> None:
     sha = "a" * 64
-    opener = _FakeOpener({
-        f"https://www.virustotal.com/api/v3/files/{sha}": _stats_body(
-            {"malicious": 3, "suspicious": 1, "harmless": 0, "undetected": 60}
-        ),
-    })
+    opener = _FakeOpener(
+        {
+            f"https://www.virustotal.com/api/v3/files/{sha}": _stats_body(
+                {"malicious": 3, "suspicious": 1, "harmless": 0, "undetected": 60}
+            ),
+        }
+    )
     client = VtClient(api_key="test", min_gap_s=0, opener=opener)
     v = client.lookup(sha)
     assert v.known is True
@@ -85,9 +85,11 @@ def test_no_api_key_disables_client() -> None:
 
 def test_caches_repeat_lookups() -> None:
     sha = "d" * 64
-    opener = _FakeOpener({
-        f"https://www.virustotal.com/api/v3/files/{sha}": _stats_body({}),
-    })
+    opener = _FakeOpener(
+        {
+            f"https://www.virustotal.com/api/v3/files/{sha}": _stats_body({}),
+        }
+    )
     client = VtClient(api_key="test", min_gap_s=0, opener=opener)
     v1 = client.lookup(sha)
     v2 = client.lookup(sha)
@@ -97,9 +99,11 @@ def test_caches_repeat_lookups() -> None:
 
 def test_bulk_lookup_deduplicates() -> None:
     sha = "e" * 64
-    opener = _FakeOpener({
-        f"https://www.virustotal.com/api/v3/files/{sha}": _stats_body({}),
-    })
+    opener = _FakeOpener(
+        {
+            f"https://www.virustotal.com/api/v3/files/{sha}": _stats_body({}),
+        }
+    )
     client = VtClient(api_key="test", min_gap_s=0, opener=opener)
     result = client.bulk_lookup([sha, sha.upper()])
     assert isinstance(result[sha], VtVerdict)

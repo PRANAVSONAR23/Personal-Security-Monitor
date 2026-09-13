@@ -12,14 +12,18 @@ from pathlib import Path
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _MIGRATION_RE = re.compile(r"^(\d{3})_[a-z0-9_]+\.sql$")
 
+PSM_MAJOR = "2"
 
-def default_db_path() -> Path:
+
+def default_data_dir() -> Path:
     root = os.environ.get("PSM_DATA_DIR")
     if root:
-        return Path(root) / "psm.sqlite"
-    local = os.environ.get("LOCALAPPDATA")
-    base = Path(local) if local else Path.home() / ".local" / "share"
-    return base / "psm" / "psm.sqlite"
+        return Path(root)
+    return Path.home() / "Library" / "Application Support" / "psm"
+
+
+def default_db_path() -> Path:
+    return default_data_dir() / "psm.sqlite"
 
 
 def connect(db_path: Path | str) -> sqlite3.Connection:
@@ -83,7 +87,38 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         conn.execute("COMMIT")
 
 
+class IncompatibleDatabase(RuntimeError):
+    pass
+
+
+def _assert_not_v1(conn: sqlite3.Connection, path: Path) -> None:
+    """v2 changed canonical JSON and path normalization, invalidating every v1
+    item hash and the entire event chain. There is no meaningful migration, so
+    say so plainly instead of silently producing a corrupt diff."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'"
+    ).fetchone()
+    if row is None:
+        return
+    r = conn.execute("SELECT value FROM meta WHERE key='psm_major'").fetchone()
+    if r is not None and r["value"] == PSM_MAJOR:
+        return
+    has_events = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='events'"
+    ).fetchone()
+    if has_events is None:
+        return
+    raise IncompatibleDatabase(
+        f"{path} is a psm v1 database. v2 changed canonical JSON (v1→v2) and path "
+        f"normalization, so every stored item hash and the whole event chain are "
+        f"invalid under v2 rules — there is no migration. Move it aside and take a "
+        f"fresh baseline:  mv {path} {path}.v1"
+    )
+
+
 def open_db(db_path: Path | str | None = None) -> sqlite3.Connection:
-    conn = connect(db_path or default_db_path())
+    path = Path(db_path or default_db_path())
+    conn = connect(path)
+    _assert_not_v1(conn, path)
     migrate(conn)
     return conn

@@ -13,24 +13,32 @@
 - Rewrite the docs and the collector layer; **port** the proven v1 kernel
   (canonical, chain, diff, rules, store, report).
 
-## Phase 0 — Kernel port + defect fixes
-- [ ] pyproject (3.12, uv), ruff, pytest, `psm` entry point
-- [ ] Port canonical / chain / diff / rules / queries / report
-- [ ] Schema v2 (+ artifacts, findings, flows, flow_rollups; events.source/ref_id)
-- [ ] Data dir → `~/Library/Application Support/psm/`
-- [ ] `core/tiers.py`
-- [ ] Delete windows collector, shim, macOS SSH transport + ingest
-- [ ] **F1** capabilities derived from `RawBundle.collected` + regression test
-- [ ] **F2** per-item guards + regression test (malformed plist)
-- [ ] **F3** Chrome `Secure Preferences` + regression test
-- [ ] **F4** remove dead process/network normalize paths
-- [ ] **F5** wire macOS file walk through the CLI
-- [ ] **F6** platform-aware `norm_path` + NFC
-- [ ] `psm --version`, `psm watch --before-after`, `psm persistence`
-- [ ] **Exit:** pytest green incl. 6 regression tests; chain verifies
+## Phase 0 — Kernel port + defect fixes  ✅ COMPLETE
+- [x] pyproject (3.12, uv), ruff, pytest, `psm` entry point
+- [x] Port canonical / chain / diff / rules / queries / report
+- [x] Schema v2 (+ artifacts, findings, flows, flow_rollups; events.source/ref_id)
+- [x] Data dir → `~/Library/Application Support/psm/`; v1 databases refused with
+      an explanation rather than silently mis-diffed
+- [x] `core/tiers.py` — base / fda / admin / rooted
+- [x] Delete windows collector, shim, macOS SSH transport + ingest
+- [x] Collector registry; orchestrator no longer hardcodes platforms
+- [x] **F1** capabilities derived from `RawBundle.collected` (3 regression tests,
+      incl. the 64-phantom-removal reproduction)
+- [x] **F2** per-item guard contract + 2 regression tests (ExpatError pinned)
+- [~] **F3** Chrome `Secure Preferences` — **moved to Phase 1**: the fix lives in
+      the macOS browser collector, which Phase 1 builds. Nothing to fix yet.
+- [x] **F4** dead process/network normalize paths removed with the shim ingest
+- [x] **F5** file walk wired platform-agnostically (`DEFAULT_WALK`)
+- [x] **F6** platform-aware `norm_path` + NFC (6 tests)
+- [x] `psm --version`, `psm watch --before-after`, `psm persistence` — all three
+      specified in v1 and never built
+- [x] **Exit:** 86 passed / 0 failed · ruff clean · mypy strict clean (34 files)
+      · `psm db verify` on a fresh DB returns 0
 
-## Phase 1 — macOS inventory collector
+## Phase 1 — macOS inventory collector  ← NEXT
 - [ ] modules: apps / launchd / tcc / files / browser (incl. Brave)
+- [ ] **F3** Chrome/Edge/Brave `Secure Preferences` + regression test
+      (v1 read `Preferences` and found 0 of 10 real extensions, recording no gap)
 - [ ] `normalize/macos.py` + golden fixtures from this machine
 - [ ] `psm doctor mac` — tier reporting
 - [ ] scan report rendering

@@ -43,9 +43,7 @@ def test_parse_rejects_bad_sha(tmp_path: Path) -> None:
 
 
 def test_import_and_lookup_roundtrip(db) -> None:
-    n = known_good.import_entries(
-        db, [known_good.KnownGoodEntry(sha256=VALID_SHA, source="unit")]
-    )
+    n = known_good.import_entries(db, [known_good.KnownGoodEntry(sha256=VALID_SHA, source="unit")])
     assert n == 1
     hit = known_good.lookup(db, VALID_SHA)
     assert hit is not None
@@ -58,9 +56,7 @@ def test_import_and_lookup_roundtrip(db) -> None:
 
 
 def test_import_upserts(db) -> None:
-    known_good.import_entries(
-        db, [known_good.KnownGoodEntry(sha256=VALID_SHA, source="v1")]
-    )
+    known_good.import_entries(db, [known_good.KnownGoodEntry(sha256=VALID_SHA, source="v1")])
     known_good.import_entries(
         db, [known_good.KnownGoodEntry(sha256=VALID_SHA, source="v2", label="upgraded")]
     )

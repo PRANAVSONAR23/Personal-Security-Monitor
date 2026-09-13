@@ -90,9 +90,7 @@ def _render_category(
             f"[{_sev_style(e.severity)}]{e.severity}[/{_sev_style(e.severity)}]",
         ]
         if show_enrich:
-            row.append(
-                (enrichment or {}).get(e.id, "") if e.id is not None else ""
-            )
+            row.append((enrichment or {}).get(e.id, "") if e.id is not None else "")
         table.add_row(*row)
     console.print(table)
 

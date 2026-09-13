@@ -27,26 +27,43 @@ def _event(**kwargs) -> Event:
 
 # ---------- predicates ----------
 
+
 def test_predicate_eq_scalar():
     p = Predicate(field_path=("payload", "signature_status"), eq="unsigned")
     ev = _event()
-    assert p.evaluate(ev, {"signature_status": "unsigned"}) is True
-    assert p.evaluate(ev, {"signature_status": "valid"}) is False
+    assert p.evaluate(ev, {"signature_status": "unsigned"}, "macos") is True
+    assert p.evaluate(ev, {"signature_status": "valid"}, "macos") is False
 
 
 def test_predicate_in_list():
     p = Predicate(field_path=("payload", "signature_status"), in_=("unsigned", "invalid"))
     ev = _event()
-    assert p.evaluate(ev, {"signature_status": "invalid"}) is True
-    assert p.evaluate(ev, {"signature_status": "notarized"}) is False
+    assert p.evaluate(ev, {"signature_status": "invalid"}, "macos") is True
+    assert p.evaluate(ev, {"signature_status": "notarized"}, "macos") is False
 
 
-def test_predicate_prefix_any_path_normalized():
+def test_predicate_prefix_any_path_normalized_macos():
+    """APFS is case-insensitive, so a prefix must match regardless of casing."""
+    p = Predicate(field_path=("payload", "path"), prefix_any=("/Users/",))
+    ev = _event()
+    assert p.evaluate(ev, {"path": "/USERS/x/foo"}, "macos") is True
+    assert p.evaluate(ev, {"path": "/opt/homebrew/bin/foo"}, "macos") is False
+
+
+def test_predicate_prefix_any_not_folded_on_android():
+    """F6: Android is case-sensitive; folding there would match the wrong file."""
+    p = Predicate(field_path=("payload", "path"), prefix_any=("/sdcard/Download/",))
+    ev = _event()
+    assert p.evaluate(ev, {"path": "/sdcard/Download/a.apk"}, "android") is True
+    assert p.evaluate(ev, {"path": "/sdcard/download/a.apk"}, "android") is False
+
+
+def test_predicate_prefix_any_windows_branch_retained():
+    """norm_path keeps a Windows branch for a future Windows target."""
     p = Predicate(field_path=("payload", "path"), prefix_any=("C:\\Users\\",))
     ev = _event()
-    # Value casing differs from prefix — both should be casefolded via norm_path.
-    assert p.evaluate(ev, {"path": "C:/USERS/x/foo.exe"}) is True
-    assert p.evaluate(ev, {"path": "D:\\Tools\\foo.exe"}) is False
+    assert p.evaluate(ev, {"path": "C:/USERS/x/foo.exe"}, "windows") is True
+    assert p.evaluate(ev, {"path": "D:\\Tools\\foo.exe"}, "windows") is False
 
 
 def test_predicate_has_any_list_intersection():
@@ -55,27 +72,28 @@ def test_predicate_has_any_list_intersection():
         has_any=("<all_urls>", "*://*/*"),
     )
     ev = _event(category="browser")
-    assert p.evaluate(ev, {"permissions": ["storage", "<all_urls>"]}) is True
-    assert p.evaluate(ev, {"permissions": ["storage", "tabs"]}) is False
+    assert p.evaluate(ev, {"permissions": ["storage", "<all_urls>"]}, "macos") is True
+    assert p.evaluate(ev, {"permissions": ["storage", "tabs"]}, "macos") is False
     # Non-list value → False, not an exception.
-    assert p.evaluate(ev, {"permissions": "<all_urls>"}) is False
+    assert p.evaluate(ev, {"permissions": "<all_urls>"}, "macos") is False
 
 
 def test_predicate_exists():
     p_true = Predicate(field_path=("payload", "sha256"), exists=True)
     p_false = Predicate(field_path=("payload", "sha256"), exists=False)
     ev = _event()
-    assert p_true.evaluate(ev, {"sha256": "abc"}) is True
-    assert p_true.evaluate(ev, {}) is False
-    assert p_false.evaluate(ev, {}) is True
+    assert p_true.evaluate(ev, {"sha256": "abc"}, "macos") is True
+    assert p_true.evaluate(ev, {}, "macos") is False
+    assert p_false.evaluate(ev, {}, "macos") is True
 
 
 def test_predicate_missing_payload_field_is_false():
     p = Predicate(field_path=("payload", "signature_status"), eq="unsigned")
-    assert p.evaluate(_event(), {}) is False
+    assert p.evaluate(_event(), {}, "macos") is False
 
 
 # ---------- match rules ----------
+
 
 def test_match_bumps_severity_and_produces_alert():
     rule = Rule(
@@ -85,9 +103,7 @@ def test_match_bumps_severity_and_produces_alert():
         match=MatchClause(
             category="file",
             action="added",
-            where=(
-                Predicate(field_path=("payload", "signature_status"), in_=("unsigned",)),
-            ),
+            where=(Predicate(field_path=("payload", "signature_status"), in_=("unsigned",)),),
         ),
     )
     ev = _event()
@@ -111,6 +127,7 @@ def test_match_never_downgrades_severity():
 
 # ---------- correlate ----------
 
+
 def test_correlate_pairs_events_by_path():
     rule = Rule(
         id="persist-plus-file",
@@ -125,15 +142,16 @@ def test_correlate_pairs_events_by_path():
             ),
         ),
     )
-    persist_ev = _event(category="persistence", subject_key="persist:runkey:bar")
-    file_ev = _event(subject_key="file:c:\\users\\x\\bar.exe")
+    persist_ev = _event(category="persistence", subject_key="persist:macos:launchagent:com.bar")
+    file_ev = _event(subject_key="file:/Users/x/Library/bar")
 
     def resolver(e: Event) -> dict:
         if e is persist_ev:
-            return {"target": "C:\\Users\\X\\bar.EXE"}  # different casing on purpose
-        return {"path": "c:/users/x/BAR.exe"}
+            return {"target": "/Users/X/Library/BAR"}  # different casing on purpose
+        return {"path": "/users/x/library/bar"}
 
-    alerts = evaluate([rule], [persist_ev, file_ev], resolver)
+    # APFS is case-insensitive, so the join must still pair these two.
+    alerts = evaluate([rule], [persist_ev, file_ev], resolver, "macos")
     assert len(alerts) == 1
     assert persist_ev.severity == "alert"
     assert file_ev.severity == "alert"
@@ -169,6 +187,7 @@ def test_correlate_no_pair_no_alert():
 
 
 # ---------- built-ins ----------
+
 
 def test_builtin_rules_load():
     rules = load_builtin_rules()

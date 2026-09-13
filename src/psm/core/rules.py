@@ -28,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from psm.core.models import Event, Severity
+from psm.core.models import Event, Platform, Severity
 from psm.normalize.paths import norm_path
 
 log = logging.getLogger(__name__)
@@ -53,7 +53,9 @@ class Predicate:
     has_any: tuple[object, ...] | None = None  # list-valued field ∩ has_any is non-empty
     exists: bool | None = None
 
-    def evaluate(self, event: Event, payload: dict[str, Any]) -> bool:  # noqa: PLR0911
+    def evaluate(  # noqa: PLR0911 — one early return per predicate op reads better
+        self, event: Event, payload: dict[str, Any], platform: Platform
+    ) -> bool:
         value = _resolve(self.field_path, event, payload)
         if self.exists is not None:
             return (value is not None) == self.exists
@@ -71,9 +73,10 @@ class Predicate:
         if self.prefix_any is not None:
             if not isinstance(value, str):
                 return False
-            candidate = _maybe_norm(self.field_path, value)
+            candidate = _maybe_norm(self.field_path, value, platform)
             return any(
-                candidate.startswith(_maybe_norm(self.field_path, p)) for p in self.prefix_any
+                candidate.startswith(_maybe_norm(self.field_path, p, platform))
+                for p in self.prefix_any
             )
         return True
 
@@ -90,13 +93,20 @@ def _resolve(field_path: tuple[str, ...], event: Event, payload: dict[str, Any])
     return getattr(event, field_path[0], None)
 
 
-def _maybe_norm(field_path: tuple[str, ...], value: str) -> str:
+def _maybe_norm(field_path: tuple[str, ...], value: str, platform: Platform) -> str:
+    """Path-shaped fields compare through the *device's* normalization.
+
+    v1 hardcoded "windows" here, which casefolded macOS and Android paths and
+    silently merged `/Users/Pranav/x` with `/users/pranav/x` in every prefix
+    predicate and correlate join.
+    """
     if field_path[0] == "payload" and len(field_path) > 1 and field_path[-1] in _PATH_FIELDS:
-        return norm_path(value, "windows")
+        return norm_path(value, platform)
     return value
 
 
 # ---------- rule shapes ----------
+
 
 @dataclass(slots=True)
 class MatchClause:
@@ -104,17 +114,17 @@ class MatchClause:
     action: str | None
     where: tuple[Predicate, ...] = field(default_factory=tuple)
 
-    def matches(self, event: Event, payload: dict[str, Any]) -> bool:
+    def matches(self, event: Event, payload: dict[str, Any], platform: Platform) -> bool:
         if self.category is not None and event.category != self.category:
             return False
         if self.action is not None and event.action != self.action:
             return False
-        return all(p.evaluate(event, payload) for p in self.where)
+        return all(p.evaluate(event, payload, platform) for p in self.where)
 
 
 @dataclass(slots=True)
 class CorrelateJoin:
-    left_field: tuple[str, ...]   # ("payload", "target")
+    left_field: tuple[str, ...]  # ("payload", "target")
     right_field: tuple[str, ...]  # ("payload", "path")
 
 
@@ -136,6 +146,7 @@ class Rule:
 
 # ---------- loader ----------
 
+
 class RuleParseError(ValueError):
     pass
 
@@ -144,7 +155,7 @@ def _parse_predicate(field_path: tuple[str, ...], raw: Any) -> Predicate:  # noq
     if isinstance(raw, dict):
         if len(raw) != 1:
             raise RuleParseError(f"{'.'.join(field_path)}: predicate dict must have one key")
-        (op, arg), = raw.items()
+        ((op, arg),) = raw.items()
         if op == "prefix_any":
             if not isinstance(arg, list) or not all(isinstance(x, str) for x in arg):
                 raise RuleParseError(f"{'.'.join(field_path)}: prefix_any expects list[str]")
@@ -285,18 +296,19 @@ def _bump_severity(event: Event, new_sev: Severity) -> None:
 
 
 def _extract_join_value(
-    field_path: tuple[str, ...], event: Event, payload: dict[str, Any]
+    field_path: tuple[str, ...], event: Event, payload: dict[str, Any], platform: Platform
 ) -> str | None:
     value = _resolve(field_path, event, payload)
     if not isinstance(value, str):
         return None
-    return _maybe_norm(field_path, value)
+    return _maybe_norm(field_path, value, platform)
 
 
 def evaluate(  # noqa: PLR0912
     rules: Iterable[Rule],
     events: Iterable[Event],
     resolve_payload: PayloadResolver,
+    platform: Platform = "macos",
 ) -> list[AlertIntent]:
     """Mutate event.severity in place; return alert intents.
 
@@ -310,7 +322,7 @@ def evaluate(  # noqa: PLR0912
     for rule in rules:
         if rule.match is not None:
             for e in events_list:
-                if rule.match.matches(e, payloads[id(e)]):
+                if rule.match.matches(e, payloads[id(e)], platform):
                     _bump_severity(e, rule.severity)
                     if rule.severity == "alert":
                         alerts.append(
@@ -325,15 +337,15 @@ def evaluate(  # noqa: PLR0912
         elif rule.correlate is not None:
             c = rule.correlate
             a_hits = [
-                (e, _extract_join_value(c.join.left_field, e, payloads[id(e)]))
+                (e, _extract_join_value(c.join.left_field, e, payloads[id(e)], platform))
                 for e in events_list
-                if c.a.matches(e, payloads[id(e)])
+                if c.a.matches(e, payloads[id(e)], platform)
             ]
             b_by_value: dict[str, list[Event]] = {}
             for e in events_list:
-                if not c.b.matches(e, payloads[id(e)]):
+                if not c.b.matches(e, payloads[id(e)], platform):
                     continue
-                val = _extract_join_value(c.join.right_field, e, payloads[id(e)])
+                val = _extract_join_value(c.join.right_field, e, payloads[id(e)], platform)
                 if val is None:
                     continue
                 b_by_value.setdefault(val, []).append(e)

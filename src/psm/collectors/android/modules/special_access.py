@@ -19,6 +19,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from psm.collectors.android.modules.packages import ModuleResult
 from psm.core.models import CollectionGap
 
 ShellFn = Callable[[str], tuple[int, str, str]]
@@ -27,18 +28,18 @@ _ACCESSIBILITY_ENTRY = re.compile(r"^([^/]+)/[^:]+$")
 _OWNER_PKG = re.compile(r"([\w\.]+)/[\w\.$]+")
 
 
-def collect(shell: ShellFn) -> tuple[list[dict[str, Any]], list[CollectionGap]]:
-    entries: list[dict[str, Any]] = []
-    gaps: list[CollectionGap] = []
+def collect(shell: ShellFn) -> ModuleResult:
+    result = ModuleResult()
+    result.entries.extend(_collect_accessibility(shell, result.gaps))
+    result.entries.extend(_collect_device_admins(shell, result.gaps))
+    # Both sub-reads failing means we learned nothing about special access.
+    result.ok = not (
+        len(result.gaps) == 2 and all(g.module == "special_access" for g in result.gaps)
+    )
+    return result
 
-    entries.extend(_collect_accessibility(shell, gaps))
-    entries.extend(_collect_device_admins(shell, gaps))
-    return entries, gaps
 
-
-def _collect_accessibility(
-    shell: ShellFn, gaps: list[CollectionGap]
-) -> list[dict[str, Any]]:
+def _collect_accessibility(shell: ShellFn, gaps: list[CollectionGap]) -> list[dict[str, Any]]:
     rc, stdout, stderr = shell("settings get secure enabled_accessibility_services")
     if rc != 0:
         gaps.append(CollectionGap("special_access", "settings-failed", stderr.strip()[:120]))
@@ -65,9 +66,7 @@ def _collect_accessibility(
     return entries
 
 
-def _collect_device_admins(
-    shell: ShellFn, gaps: list[CollectionGap]
-) -> list[dict[str, Any]]:
+def _collect_device_admins(shell: ShellFn, gaps: list[CollectionGap]) -> list[dict[str, Any]]:
     rc, stdout, stderr = shell("dpm list-owners")
     if rc != 0:
         # Fallback: dumpsys device_policy — noisier, but covers older devices.

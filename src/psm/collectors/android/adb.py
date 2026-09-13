@@ -1,6 +1,6 @@
-"""ADB wrapper (LLD §3, implementation §3.5).
+"""ADB wrapper (LLD §4).
 
-Locates adb.exe (config path → PATH → bundled) and wraps every call with the shared
+Locates adb (config path → PSM_ADB → ANDROID_HOME → PATH) and wraps every call with the shared
 subprocess helper (timeout + output cap). All shell commands go via `adb -s SERIAL shell CMD`.
 
 Device states:
@@ -30,13 +30,17 @@ DEFAULT_TIMEOUT_S = 30
 SHELL_OUTPUT_CAP = 8 * 1024 * 1024  # LLD §3.5
 
 # 3rd-party OEM guidance surfaced by `psm doctor`.
-DRIVER_GUIDANCE = (
-    "If the device appears as 'offline' or does not appear at all: install the OEM "
-    "USB driver (Samsung/Xiaomi/OnePlus each ship their own) or the Google USB driver "
-    "for Pixel devices, then re-run `adb devices`.",
-    "If the device shows as 'unauthorized': accept the 'Allow USB debugging?' prompt "
-    "on the phone screen and reconnect.",
+# macOS needs no USB drivers for adb — the v1 OEM-driver guidance was a Windows
+# concern and is gone. What remains are the states that actually occur here.
+CONNECT_GUIDANCE = (
+    "'unauthorized': accept the 'Allow USB debugging?' prompt on the phone, then "
+    "re-run `adb devices`.",
+    "'offline' or absent over Wi-Fi: the pairing expired or the phone changed IP. "
+    "Re-pair with `adb pair <host>:<port>` then `adb connect <host>:<port>`.",
+    "On MIUI, 'Wireless debugging' lives under Developer options and switches off "
+    "after a reboot; USB debugging (Security settings) must also be on to install.",
 )
+DRIVER_GUIDANCE = CONNECT_GUIDANCE  # back-compat alias
 
 
 class AdbError(RuntimeError):
@@ -61,27 +65,31 @@ class ShellResult:
 
 
 def find_adb(config_path: str | None = None) -> Path:
-    """Look up `adb.exe` in three places:
+    """Look up `adb` in order:
 
     1. Explicit `config_path` (from config.yaml).
-    2. `PSM_ADB` env override (useful for tests).
-    3. `PATH` (the platform-tools install case).
-    4. Bundled `vendor/platform-tools/adb.exe` next to the source tree.
+    2. `PSM_ADB` env override.
+    3. `$ANDROID_HOME/platform-tools/adb`.
+    4. `PATH`.
+    5. The Homebrew commandlinetools location, which is not on PATH by default.
     """
     for candidate in _adb_candidates(config_path):
         if candidate and Path(candidate).exists():
             return Path(candidate)
     raise AdbNotFound(
-        "adb.exe not found — install Android platform-tools "
-        "(https://developer.android.com/tools/releases/platform-tools) and add it to PATH."
+        "adb not found. Install platform-tools (`brew install --cask android-commandlinetools`) "
+        "or set PSM_ADB / ANDROID_HOME. On this machine it lives at "
+        "$ANDROID_HOME/platform-tools/adb and is not on PATH."
     )
 
 
 def _adb_candidates(config_path: str | None) -> list[str | None]:
     env_override = os.environ.get("PSM_ADB")
+    android_home = os.environ.get("ANDROID_HOME")
+    from_home = str(Path(android_home) / "platform-tools" / "adb") if android_home else None
     on_path = shutil.which("adb")
-    bundled = str(Path(__file__).resolve().parents[3] / "vendor" / "platform-tools" / "adb.exe")
-    return [config_path, env_override, on_path, bundled]
+    well_known = "/opt/homebrew/share/android-commandlinetools/platform-tools/adb"
+    return [config_path, env_override, from_home, on_path, well_known]
 
 
 def list_devices(adb: Path, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[AdbDevice]:

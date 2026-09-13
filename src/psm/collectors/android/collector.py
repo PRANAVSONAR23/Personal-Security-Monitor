@@ -36,14 +36,19 @@ class AndroidCollector(Collector):
     def __init__(self, config: AndroidConfig | None = None) -> None:
         self.config = config or AndroidConfig()
 
-    def capabilities(self, device: Device) -> set[str]:
-        # A device shows up as capable when we have some way to shell into it —
-        # a bound shell_fn (tests), a config-supplied adb path, or a detected adb.exe.
+    def satisfied_tiers(self, device: Device) -> set[str]:
+        """`base` when we can shell in. `rooted` is never satisfied in v2 by design."""
         if self.config.shell_fn is not None:
-            return set(self.ALL_MODULES)
+            return {"base"}
         try:
             adb.find_adb(str(self.config.adb_path) if self.config.adb_path else None)
         except adb.AdbNotFound:
+            return set()
+        return {"base"}
+
+    def capabilities(self, device: Device) -> set[str]:
+        """What we will *attempt*. What actually lands is RawBundle.collected."""
+        if not self.satisfied_tiers(device):
             return set()
         return set(self.ALL_MODULES)
 
@@ -66,34 +71,38 @@ class AndroidCollector(Collector):
             if rc == 0 and stdout.strip().isdigit():
                 self.config.detected_sdk_level = int(stdout.strip())
             else:
-                bundle.gaps.append(
-                    CollectionGap("device", "sdk-unknown", "getprop ro.build.version.sdk failed")
-                )
+                bundle.record_gap("device", "sdk-unknown", "getprop ro.build.version.sdk failed")
 
+        # F1: record() marks a category collected; a module that fails records a
+        # gap and stays out of `collected`, so the diff skips it rather than
+        # reporting every item in it as removed.
         pkg_entries: list[dict[str, Any]] = []
+        dumps: dict[str, str] = {}
         if "application" in modules:
-            pkg_entries, gaps = packages.collect(shell)
-            bundle.raw["application"] = pkg_entries
-            bundle.gaps.extend(gaps)
+            result = packages.collect(shell)
+            bundle.gaps.extend(result.gaps)
+            if result.ok:
+                pkg_entries = result.entries
+                dumps = result.dumps
+                bundle.record("application", pkg_entries)
 
         if "permission" in modules:
-            perm_entries, gaps = packages.collect_permissions(shell, pkg_entries)
-            special_entries, sgaps = special_access.collect(shell)
-            bundle.raw["permission"] = perm_entries + special_entries
-            bundle.gaps.extend(gaps)
-            bundle.gaps.extend(sgaps)
+            # Reuses the dumpsys output already captured above — v1 shelled out a
+            # second time per package, doubling ADB round trips.
+            perm_result = packages.collect_permissions(dumps)
+            special_result = special_access.collect(shell)
+            bundle.gaps.extend(perm_result.gaps)
+            bundle.gaps.extend(special_result.gaps)
+            if perm_result.ok or special_result.ok:
+                bundle.record("permission", perm_result.entries + special_result.entries)
 
         return bundle
 
-    def _resolve_shell(
-        self, device: Device, gaps: list[CollectionGap]
-    ) -> ShellFn | None:
+    def _resolve_shell(self, device: Device, gaps: list[Any]) -> ShellFn | None:
         if self.config.shell_fn is not None:
             return self.config.shell_fn
         try:
-            adb_path = adb.find_adb(
-                str(self.config.adb_path) if self.config.adb_path else None
-            )
+            adb_path = adb.find_adb(str(self.config.adb_path) if self.config.adb_path else None)
         except adb.AdbNotFound as e:
             gaps.append(CollectionGap("device", "adb-missing", str(e)))
             return None

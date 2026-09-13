@@ -21,6 +21,7 @@ GENESIS = ""
 _CORE_FIELDS = (
     "device_id",
     "ts",
+    "source",
     "category",
     "action",
     "subject_key",
@@ -28,6 +29,7 @@ _CORE_FIELDS = (
     "after_hash",
     "snap_from",
     "snap_to",
+    "ref_id",
     "severity",
 )
 
@@ -41,8 +43,8 @@ def compute_row_hash(prev: str, event: Event) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _sort_key(e: Event) -> tuple[str, str]:
-    return (e.category, e.subject_key)
+def _sort_key(e: Event) -> tuple[str, str, str]:
+    return (e.source, e.category, e.subject_key)
 
 
 def append_events(conn: sqlite3.Connection, events: Iterable[Event]) -> list[Event]:
@@ -54,12 +56,13 @@ def append_events(conn: sqlite3.Connection, events: Iterable[Event]) -> list[Eve
         event.row_hash = compute_row_hash(head, event)
         cur = conn.execute(
             "INSERT INTO events "
-            "(device_id, ts, category, action, subject_key, before_hash, after_hash, "
-            " snap_from, snap_to, severity, prev_row_hash, row_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(device_id, ts, source, category, action, subject_key, before_hash, after_hash, "
+            " snap_from, snap_to, ref_id, severity, prev_row_hash, row_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event.device_id,
                 event.ts,
+                event.source,
                 event.category,
                 event.action,
                 event.subject_key,
@@ -67,6 +70,7 @@ def append_events(conn: sqlite3.Connection, events: Iterable[Event]) -> list[Eve
                 event.after_hash,
                 event.snap_from,
                 event.snap_to,
+                event.ref_id,
                 event.severity,
                 event.prev_row_hash,
                 event.row_hash,
@@ -93,8 +97,8 @@ def verify_chain(conn: sqlite3.Connection) -> ChainReport:
     head = GENESIS
     checked = 0
     rows = conn.execute(
-        "SELECT id, device_id, ts, category, action, subject_key, "
-        "       before_hash, after_hash, snap_from, snap_to, severity, "
+        "SELECT id, device_id, ts, source, category, action, subject_key, "
+        "       before_hash, after_hash, snap_from, snap_to, ref_id, severity, "
         "       prev_row_hash, row_hash "
         "FROM events ORDER BY id ASC"
     ).fetchall()
@@ -104,6 +108,7 @@ def verify_chain(conn: sqlite3.Connection) -> ChainReport:
             id=r["id"],
             device_id=r["device_id"],
             ts=r["ts"],
+            source=r["source"],
             category=r["category"],
             action=r["action"],
             subject_key=r["subject_key"],
@@ -111,6 +116,7 @@ def verify_chain(conn: sqlite3.Connection) -> ChainReport:
             after_hash=r["after_hash"],
             snap_from=r["snap_from"],
             snap_to=r["snap_to"],
+            ref_id=r["ref_id"],
             severity=r["severity"],
         )
         expected = compute_row_hash(head, event)
