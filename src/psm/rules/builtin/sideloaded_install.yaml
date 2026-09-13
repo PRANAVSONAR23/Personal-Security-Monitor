@@ -1,0 +1,8 @@
+id: sideloaded-install
+severity: alert
+title: "Sideloaded package installed (Android)"
+match:
+  category: application
+  action: added
+  where:
+    payload.source: ["sideload", "unknown"]

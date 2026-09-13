@@ -1,0 +1,11 @@
+id: persistence-plus-new-file
+severity: alert
+title: "New persistence entry targets a file created in the same scan"
+correlate:
+  a:
+    category: persistence
+    action: added
+  b:
+    category: file
+    action: added
+  join: a.payload.target == b.payload.path

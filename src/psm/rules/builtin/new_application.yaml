@@ -1,0 +1,6 @@
+id: new-application
+severity: notice
+title: "New application registered under Uninstall keys"
+match:
+  category: application
+  action: added

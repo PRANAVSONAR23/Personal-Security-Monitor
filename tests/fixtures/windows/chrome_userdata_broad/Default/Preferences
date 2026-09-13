@@ -1,0 +1,26 @@
+{
+  "extensions": {
+    "settings": {
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+        "state": 1,
+        "install_time": "13355203200000000",
+        "location": 1,
+        "manifest": {
+          "name": "Legit Reader",
+          "version": "1.2.3",
+          "permissions": ["storage"]
+        }
+      },
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+        "state": 1,
+        "install_time": "13400000000000000",
+        "location": 1,
+        "manifest": {
+          "name": "Evil All URLs Reader",
+          "version": "0.0.1",
+          "permissions": ["tabs", "<all_urls>"]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+id: new-browser-extension-all-urls
+severity: alert
+title: "New browser extension with broad host permissions"
+match:
+  category: browser
+  action: added
+  where:
+    payload.permissions:
+      has_any:
+        - "<all_urls>"
+        - "*://*/*"
+        - "https://*/*"
+        - "http://*/*"

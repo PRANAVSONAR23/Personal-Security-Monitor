@@ -1,0 +1,16 @@
+id: unsigned-binary-user-path
+severity: alert
+title: "New unsigned executable in a user-writable location"
+match:
+  category: file
+  action: added
+  where:
+    payload.executable: true
+    payload.signature_status: ["unsigned", "invalid", "unknown"]
+    payload.path:
+      prefix_any:
+        - "C:\\Users\\"
+        - "C:\\ProgramData\\"
+        - "/Users/"
+        - "/usr/local/"
+        - "/opt/homebrew/"

@@ -1,0 +1,4 @@
+package:/system/app/GoogleContacts/GoogleContacts.apk=com.google.android.contacts installer=com.android.vending versionCode:1000
+package:/data/app/~~abc==/com.example.sideload-1/base.apk=com.example.sideload installer=com.android.shell versionCode:12
+package:/data/app/~~def==/org.thirdparty.foo-1/base.apk=org.thirdparty.foo installer=com.android.vending versionCode:307
+package:/system/priv-app/SettingsProvider/SettingsProvider.apk=com.android.providers.settings versionCode:34

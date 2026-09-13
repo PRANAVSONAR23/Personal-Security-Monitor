@@ -1,0 +1,30 @@
+Packages:
+  Package [com.example.sideload] (abc123):
+    userId=10234
+    appId=10234
+    pkg=Package{deadbeef com.example.sideload}
+    codePath=/data/app/~~abc==/com.example.sideload-1
+    resourcePath=/data/app/~~abc==/com.example.sideload-1
+    legacyNativeLibraryDir=/data/app/~~abc==/com.example.sideload-1/lib
+    primaryCpuAbi=arm64-v8a
+    secondaryCpuAbi=null
+    versionCode=12 minSdk=23 targetSdk=33
+    versionName=0.1.2
+    apkSigningVersion=3
+    splits=[base]
+    installStatus=installed
+    installLocation=0
+    installerPackageName=com.android.shell
+    packageSource=0
+    firstInstallTime=2026-05-01 10:20:30
+    lastUpdateTime=2026-05-01 10:20:30
+    signatures=PackageSignatures{aabb v3:[…]}
+    requested permissions:
+      android.permission.INTERNET
+      android.permission.CAMERA
+    install permissions:
+      android.permission.INTERNET: granted=true
+    User 0: ceDataInode=…
+      runtime permissions:
+        android.permission.CAMERA: granted=true, flags=[ USER_SET|USER_SENSITIVE_WHEN_GRANTED ]
+        android.permission.RECORD_AUDIO: granted=false, flags=[ USER_SET ]

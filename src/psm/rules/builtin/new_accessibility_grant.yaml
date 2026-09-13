@@ -1,0 +1,9 @@
+id: new-accessibility-grant
+severity: alert
+title: "New accessibility service granted (Android)"
+match:
+  category: permission
+  action: added
+  where:
+    payload.permission: "special:accessibility"
+    payload.granted: true
