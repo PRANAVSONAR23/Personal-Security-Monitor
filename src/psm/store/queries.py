@@ -379,6 +379,7 @@ def insert_flows(conn: sqlite3.Connection, flows: Iterable[Flow]) -> int:
             f.dst_ip,
             f.dst_port,
             f.hostname,
+            f.hostname_source,
             f.sni_status,
             f.app_uid,
             f.app_pkg,
@@ -391,8 +392,8 @@ def insert_flows(conn: sqlite3.Connection, flows: Iterable[Flow]) -> int:
         return 0
     conn.executemany(
         "INSERT INTO flows (device_id, ts, leg, proto, src_port, dst_ip, dst_port, "
-        "hostname, sni_status, app_uid, app_pkg, bytes_out, bytes_in) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "hostname, hostname_source, sni_status, app_uid, app_pkg, bytes_out, bytes_in) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     return len(rows)
@@ -401,9 +402,15 @@ def insert_flows(conn: sqlite3.Connection, flows: Iterable[Flow]) -> int:
 def rollup_flows(conn: sqlite3.Connection, device_id: int, hour: str) -> int:
     """Compact one hour of raw flows into per-(app, host, endpoint) aggregates.
 
-    Reports query the rollups; raw flows are retention-capped. Re-running for the
-    same hour replaces that hour's aggregates rather than double-counting.
+    Reports query the rollups; raw flows are retention-capped.
+
+    The hour's existing rows are deleted first rather than relying on an upsert.
+    `app_pkg` and `hostname` are nullable, and SQLite treats NULLs as distinct in a
+    UNIQUE index — so an ON CONFLICT target covering them never fires for
+    unattributed traffic, and re-running would add a second row every time,
+    inflating byte totals without bound.
     """
+    conn.execute("DELETE FROM flow_rollups WHERE device_id = ? AND hour = ?", (device_id, hour))
     cur = conn.execute(
         "INSERT INTO flow_rollups "
         "(device_id, hour, app_pkg, hostname, dst_ip, dst_port, flow_count, "
@@ -411,11 +418,7 @@ def rollup_flows(conn: sqlite3.Connection, device_id: int, hour: str) -> int:
         "SELECT device_id, ?, app_pkg, hostname, dst_ip, dst_port, COUNT(*), "
         "       SUM(bytes_out), SUM(bytes_in), MIN(ts), MAX(ts) "
         "FROM flows WHERE device_id = ? AND ts LIKE ? || '%' "
-        "GROUP BY device_id, app_pkg, hostname, dst_ip, dst_port "
-        "ON CONFLICT(device_id, hour, app_pkg, hostname, dst_ip, dst_port) DO UPDATE SET "
-        "  flow_count = excluded.flow_count, bytes_out = excluded.bytes_out, "
-        "  bytes_in = excluded.bytes_in, first_ts = excluded.first_ts, "
-        "  last_ts = excluded.last_ts",
+        "GROUP BY device_id, app_pkg, hostname, dst_ip, dst_port",
         (hour, device_id, hour),
     )
     return cur.rowcount

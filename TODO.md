@@ -134,15 +134,48 @@ thing that leaves the Mac: a hash reveals possession of a file and VT logs queri
   label available, for the riskiest package on the device. `classify_source` now
   reads the install path and SYSTEM flag too.
 
-## Phase 4 — Flowlog leg A (Mac-as-router)  ← NEXT
-- [ ] Internet Sharing detection + doctor check
-- [ ] pcap capture on the hotspot interface
-- [ ] decoders: DNS, TLS SNI (+ ECH detection), flow tuples, byte counts
-- [ ] flows writer + hourly rollup + retention
-- [ ] `psm flow top` / `flow host`
-- [ ] **Exit:** 5 min browsing → correct hostnames, ≥ 2k flows/s
+## Phase 4 — Flowlog: shared decoders + router leg  🟡 BUILT, LIVE TEST BLOCKED
+- [x] decoders (stdlib only): pcap framing, IPv4/IPv6, TCP/UDP, DNS queries +
+      A/AAAA answers, TLS SNI, ECH detection. Validated against **real** wire
+      bytes — a 1525-byte OpenSSL ClientHello and a live resolver response
+- [x] flow aggregator: packets folded to one row per (window, proto, remote,
+      port, hostname); DNS cache for attribution; direction from local prefix
+      with a well-known-port fallback
+- [x] `hostname_source` persisted — `sni`/`dns-query` are observed, `dns-cache`
+      is inferred, so a guess is never shown as a fact
+- [x] hourly rollup + retention purge
+- [x] `psm flow status|start|top|host|rollup`
+- [x] 24 tests. Throughput **609,000 packets/s** end-to-end (target ≥ 2,000)
+- [ ] **live capture NOT verified — blocked on hardware.** See below.
 
-## Phase 5 — Flowlog leg B (device agent) + correlation
+### Why leg A cannot run on this Mac
+The only active interface is `en0` (Wi-Fi). macOS will not share a Wi-Fi uplink
+back out over the same Wi-Fi radio, and there is no active Ethernet to share
+*from* (`en1`–`en4` and `bridge0` are all inactive). So Internet Sharing cannot
+create a hotspot for the phone to join, and there is no bridge to capture on.
+`psm flow status` reports this rather than failing obscurely.
+
+To unblock: a USB-C/Thunderbolt Ethernet adapter as the Mac's uplink, then share
+Ethernet → Wi-Fi. Capture also needs `sudo` (the `admin` tier).
+
+### Why this was still the right work
+Both capture legs share these decoders. The on-device VPN leg reads raw IP packets
+off a TUN, which is the same decode path with `LINKTYPE_RAW` instead of Ethernet —
+already implemented and tested. Leg B needs no hardware and additionally supplies
+the per-app attribution leg A cannot provide, so it is the better next step.
+
+### Found while building Phase 4
+- `rollup_flows` was **not idempotent**. SQLite treats NULLs as distinct in a
+  UNIQUE index, so rows with no `app_pkg`/`hostname` never hit the ON CONFLICT
+  target and were re-inserted — byte totals would have inflated on every run, and
+  the CLI re-rolls every hour each invocation. Now delete-then-insert per hour.
+- The `idna` codec rejects `errors="replace"`, so defensive SNI decoding crashed
+  on the first real ClientHello. Hostnames are kept as ASCII punycode, which is
+  also the honest form: `xn--80ak6aa92e.com` cannot be mistaken for `apple.com`.
+- A pcap record split across two socket reads was being dropped; the reader now
+  carries the partial tail forward.
+
+## Phase 5 — Flowlog leg B (device agent) + correlation  ← NEXT (no hardware needed)
 - [ ] `agent/android-vpn/` Kotlin VpnService, local-only
 - [ ] per-UID attribution + package resolution
 - [ ] log pull over adb + hostile-input parser

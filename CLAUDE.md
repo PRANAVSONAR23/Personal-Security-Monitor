@@ -6,8 +6,11 @@ Guidance for Claude Code working in this repository.
 
 **v2 rewrite, in progress on branch `v2/mac-controller`.** Phases 0 (kernel
 port + v1 defect fixes), 1 (macOS inventory) and 2 (Android inventory over
-wireless ADB) and 3 (hunt) are complete; Phase 4 (flowlog, Mac-as-router leg) is
-next. See `TODO.md` for progress.
+wireless ADB) and 3 (hunt) are complete. Phase 4 built the shared packet decoders
+and the router capture leg, but that leg's **live test is blocked**: this Mac has
+only a Wi-Fi uplink and macOS cannot share Wi-Fi over Wi-Fi, so no hotspot bridge
+exists to capture on. Phase 5 (on-device VPN leg) is next — it needs no extra
+hardware and reuses the same decoders. See `TODO.md`.
 
 v1 (branch `main`) was a working Windows-controlled tool — ~4,500 lines, 102
 tests. It is **superseded, not deleted**: its proven core is being ported, its
@@ -91,6 +94,11 @@ flagging it. Revisited at Phase 3.
 the free tier's 4 req/min is 132 minutes and over the daily cap. It is also the
 only thing that leaves the Mac. Use it targeted, on artifacts a local analyzer
 already flagged, behind `--enrich vt` and an explicit key.
+
+**Packet decoders are shared by both capture legs.** `streams/netflow/decode.py`
+takes a `linktype`: Ethernet for the router bridge, `LINKTYPE_RAW` for a TUN. Do
+not fork it per leg. Validate changes against real wire bytes — a real OpenSSL
+ClientHello caught a defect that hand-written fixtures hid.
 
 **Hunt analyzers do no I/O.** They are pure functions of an artifact plus the
 inventory payload already collected, which is what makes `psm hunt` re-runnable

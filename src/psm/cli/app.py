@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
+from datetime import timedelta
 from pathlib import Path
 
 import typer
@@ -26,7 +28,7 @@ from psm.report import daily as daily_report
 from psm.report.explain import render as render_explain
 from psm.report.scan import render_alerts, render_scan
 from psm.report.timeline import export_jsonl, iso_ago, parse_last, render_timeline
-from psm.store.db import default_data_dir, open_db
+from psm.store.db import default_data_dir, open_db, transaction
 from psm.store.queries import (
     get_device_by_name,
     insert_device,
@@ -38,8 +40,12 @@ from psm.store.queries import (
     load_snapshot,
     load_snapshot_items,
     load_timeline,
+    purge_flows_before,
+    rollup_flows,
     set_alert_status,
 )
+from psm.streams.netflow.router import RouterSource, hotspot_prefixes
+from psm.streams.netflow.writer import FlowAggregator, persist
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 db_app = typer.Typer(no_args_is_help=True, help="Database maintenance.")
@@ -49,6 +55,7 @@ alerts_app = typer.Typer(
 )
 report_app = typer.Typer(no_args_is_help=True, help="Scheduled reports.")
 enrich_app = typer.Typer(no_args_is_help=True, help="Enrichment: known-good hashes.")
+flow_app = typer.Typer(no_args_is_help=True, help="Network flow capture and queries.")
 hunt_app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
@@ -60,6 +67,7 @@ app.add_typer(alerts_app, name="alerts")
 app.add_typer(report_app, name="report")
 app.add_typer(enrich_app, name="enrich")
 app.add_typer(hunt_app, name="hunt")
+app.add_typer(flow_app, name="flow")
 
 console = Console()
 err = Console(stderr=True)
@@ -626,6 +634,198 @@ def _render_findings(conn: sqlite3.Connection, findings: list) -> None:
             str(f.evidence.get("detail", "")),
         )
     console.print(table)
+
+
+# ---- flow ----
+
+FLUSH_EVERY = 500  # packets between database writes
+
+
+@flow_app.command("status")
+def flow_status(db: Path | None = DbOption) -> None:
+    """Report whether a capture leg can run, and what is stored."""
+    conn = open_db(db)
+    source = RouterSource()
+    ok, detail = source.available()
+    mark = "[green]ready[/green]" if ok else "[yellow]unavailable[/yellow]"
+    console.print(f"router leg: {mark}")
+    console.print(f"  {detail}")
+
+    row = conn.execute("SELECT COUNT(*) n, MIN(ts) lo, MAX(ts) hi FROM flows").fetchone()
+    console.print(
+        f"stored flows: {row['n']}" + (f"  window={row['lo']} … {row['hi']}" if row["n"] else "")
+    )
+    rollups = conn.execute("SELECT COUNT(*) n FROM flow_rollups").fetchone()["n"]
+    console.print(f"hourly rollups: {rollups}")
+
+
+@flow_app.command("start")
+def flow_start(
+    name: str = typer.Argument(None, help="Device the captured traffic belongs to."),
+    interface: str = typer.Option(None, "--interface", help="Override the capture interface."),
+    seconds: int = typer.Option(0, "--seconds", help="Stop after N seconds (0 = until Ctrl-C)."),
+    db: Path | None = DbOption,
+) -> None:
+    """Capture flows off the Internet Sharing bridge until stopped."""
+    conn = open_db(db)
+    device = _get_device(conn, name)
+    assert device.id is not None
+
+    source = RouterSource(interface=interface)
+    ok, detail = source.available()
+    if not ok:
+        err.print(f"[red]cannot start capture:[/red] {detail}")
+        raise typer.Exit(code=1)
+
+    iface = interface or detail
+    agg = FlowAggregator(device_id=device.id, leg="router", local_prefixes=hotspot_prefixes(iface))
+    console.print(
+        f"capturing on [cyan]{iface}[/cyan] for {device.name} "
+        f"(local prefixes: {list(agg.local_prefixes) or 'unknown'})  — Ctrl-C to stop"
+    )
+
+    deadline = time.monotonic() + seconds if seconds else None
+    written = 0
+    packets = 0
+    try:
+        for pkt in source.subscribe():
+            agg.add(pkt)
+            packets += 1
+            if packets % FLUSH_EVERY == 0:
+                written += _flush(conn, agg)
+            if deadline and time.monotonic() > deadline:
+                break
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopping[/dim]")
+    finally:
+        source.stop()
+        written += _flush(conn, agg)
+
+    console.print(f"[green]captured[/green] {packets} packets → {written} flow rows")
+    if agg.dns:
+        console.print(f"DNS names observed: {len(agg.dns)}")
+
+
+def _flush(conn: sqlite3.Connection, agg: FlowAggregator) -> int:
+    flows = agg.drain()
+    if not flows:
+        return 0
+    with transaction(conn):
+        return persist(conn, flows)
+
+
+@flow_app.command("top")
+def flow_top(
+    by: str = typer.Option("host", "--by", help="host|app|ip"),
+    last: str = typer.Option("24h", "--last", help="Window spec, e.g. 24h, 7d."),
+    limit: int = typer.Option(25, "--limit"),
+    db: Path | None = DbOption,
+) -> None:
+    """Rank what the device talked to."""
+    if by not in ("host", "app", "ip"):
+        err.print("[red]--by must be host|app|ip[/red]")
+        raise typer.Exit(code=1)
+    conn = open_db(db)
+    try:
+        since = iso_ago(parse_last(last))
+    except ValueError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    column = {"host": "hostname", "app": "app_pkg", "ip": "dst_ip"}[by]
+    rows = conn.execute(
+        f"SELECT COALESCE({column}, '(unattributed)') k, COUNT(*) flows, "
+        f"       SUM(bytes_out) out_b, SUM(bytes_in) in_b "
+        f"FROM flows WHERE ts >= ? GROUP BY k ORDER BY flows DESC LIMIT ?",
+        (since, limit),
+    ).fetchall()
+    if not rows:
+        console.print(f"[dim]no flows in the last {last}[/dim]")
+        return
+
+    table = Table(title=f"top by {by} (last {last})")
+    table.add_column(by)
+    table.add_column("flows", justify="right")
+    table.add_column("out", justify="right")
+    table.add_column("in", justify="right")
+    for r in rows:
+        table.add_row(str(r["k"]), str(r["flows"]), _bytes(r["out_b"]), _bytes(r["in_b"]))
+    console.print(table)
+
+
+@flow_app.command("host")
+def flow_host(
+    hostname: str = typer.Argument(..., help="Hostname to look up."),
+    last: str = typer.Option("7d", "--last"),
+    db: Path | None = DbOption,
+) -> None:
+    """Show every flow to a hostname."""
+    conn = open_db(db)
+    try:
+        since = iso_ago(parse_last(last))
+    except ValueError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    rows = conn.execute(
+        "SELECT ts, proto, dst_ip, dst_port, app_pkg, sni_status, bytes_out, bytes_in "
+        "FROM flows WHERE hostname = ? AND ts >= ? ORDER BY ts DESC LIMIT 200",
+        (hostname, since),
+    ).fetchall()
+    if not rows:
+        console.print(f"[dim]no flows to {hostname} in the last {last}[/dim]")
+        return
+    table = Table(title=f"{hostname} (last {last})")
+    for col in ("ts", "proto", "ip", "port", "app", "sni", "out", "in"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(
+            r["ts"],
+            r["proto"],
+            r["dst_ip"],
+            str(r["dst_port"]),
+            r["app_pkg"] or "",
+            r["sni_status"] or "",
+            _bytes(r["bytes_out"]),
+            _bytes(r["bytes_in"]),
+        )
+    console.print(table)
+
+
+@flow_app.command("rollup")
+def flow_rollup(
+    name: str = typer.Argument(None, help="Device name."),
+    keep_days: int = typer.Option(7, "--keep-days", help="Raw flow retention."),
+    db: Path | None = DbOption,
+) -> None:
+    """Compact raw flows into hourly aggregates and drop raw rows past retention."""
+    conn = open_db(db)
+    device = _get_device(conn, name)
+    assert device.id is not None
+    hours = [
+        r["h"]
+        for r in conn.execute(
+            "SELECT DISTINCT substr(ts, 1, 13) h FROM flows WHERE device_id = ?",
+            (device.id,),
+        ).fetchall()
+    ]
+    with transaction(conn):
+        for hour in hours:
+            rollup_flows(conn, device.id, hour)
+        cutoff = iso_ago(timedelta(days=keep_days))
+        purged = purge_flows_before(conn, cutoff)
+    console.print(
+        f"[green]rolled up[/green] {len(hours)} hour(s); purged {purged} raw row(s) "
+        f"older than {keep_days}d"
+    )
+
+
+def _bytes(n: int | None) -> str:
+    value = float(n or 0)
+    for unit in ("B", "K", "M", "G"):
+        if value < 1024 or unit == "G":
+            return f"{value:.0f}{unit}" if unit == "B" else f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{value:.1f}G"
 
 
 # ---- timeline ----
