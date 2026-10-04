@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from psm.collectors.android.parsers import dumpsys_packages
-from psm.collectors.android.parsers.pm_list import classify_installer
+from psm.collectors.android.parsers.pm_list import classify_source
 from psm.collectors.base import ModuleResult
 
 ShellFn = Callable[[str], tuple[int, str, str]]  # (rc, stdout, stderr)
@@ -117,12 +117,15 @@ def collect(shell: ShellFn, *, sensitive_only: bool = True) -> tuple[ModuleResul
                 "version": p.version_name,
                 "version_code": p.version_code,
                 "installer": p.installer,
-                "source": classify_installer(p.installer),
+                "source": classify_source(p.installer, p.code_path, p.flags),
                 "apk_path": p.code_path,
                 "installed_at": p.first_install_time,
                 "last_update_time": p.last_update_time,
                 "app_id": p.user_id,
                 "signing_version": p.signing_version,
+                # Kept verbatim, not just reduced to `system`: the hunt analyzers
+                # read DEBUGGABLE / TEST_ONLY straight off this list.
+                "flags": sorted(p.flags),
                 "system": "SYSTEM" in p.flags,
                 "installed": p.installed,
                 "enabled": p.enabled,

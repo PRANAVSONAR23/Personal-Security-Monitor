@@ -70,7 +70,31 @@ _STORE_INSTALLERS = {
 
 
 def classify_installer(installer: str | None) -> str:
-    """Map installer package to a source label (store / sideload / preinstalled / unknown)."""
+    """Map an installer package name alone to a source label.
+
+    Prefer `classify_source`: a missing installer is ambiguous, and resolving it
+    needs the install path.
+    """
     if installer is None:
         return "preinstalled"
     return _STORE_INSTALLERS.get(installer, "unknown")
+
+
+def classify_source(
+    installer: str | None, code_path: str | None, flags: tuple[str, ...] = ()
+) -> str:
+    """Classify how a package arrived, using the install path as well as the installer.
+
+    A missing `installerPackageName` does NOT mean preinstalled. `adb install` and
+    some installers record nothing, so a package under /data/app with no installer
+    and no SYSTEM flag is a sideload. Classifying on the installer alone labelled a
+    sideloaded, debuggable app on the test device as "preinstalled" — the most
+    benign label available, for the riskiest package on the device.
+    """
+    if "SYSTEM" in flags:
+        return "preinstalled"
+    if installer is not None:
+        return _STORE_INSTALLERS.get(installer, "unknown")
+    if code_path and code_path.startswith("/data/app"):
+        return "sideload"
+    return "preinstalled"

@@ -21,6 +21,7 @@ from psm.core.tiers import describe, tiers_for
 from psm.enrich import known_good
 from psm.enrich.labeler import build_labels
 from psm.enrich.vt import VtClient
+from psm.hunt import runner as hunt_runner
 from psm.report import daily as daily_report
 from psm.report.explain import render as render_explain
 from psm.report.scan import render_alerts, render_scan
@@ -31,6 +32,7 @@ from psm.store.queries import (
     insert_device,
     load_alerts,
     load_event,
+    load_findings,
     load_item_payload,
     load_latest_snapshot_id,
     load_snapshot,
@@ -47,11 +49,17 @@ alerts_app = typer.Typer(
 )
 report_app = typer.Typer(no_args_is_help=True, help="Scheduled reports.")
 enrich_app = typer.Typer(no_args_is_help=True, help="Enrichment: known-good hashes.")
+hunt_app = typer.Typer(
+    no_args_is_help=False,
+    invoke_without_command=True,
+    help="Analyze collected artifacts for malicious indicators.",
+)
 app.add_typer(db_app, name="db")
 app.add_typer(device_app, name="device")
 app.add_typer(alerts_app, name="alerts")
 app.add_typer(report_app, name="report")
 app.add_typer(enrich_app, name="enrich")
+app.add_typer(hunt_app, name="hunt")
 
 console = Console()
 err = Console(stderr=True)
@@ -509,6 +517,115 @@ def alerts_root(
             f"[bold]#{a.id}[/bold]  [yellow]{a.rule_id}[/yellow]  {a.title}  "
             f"[dim]{a.ts}  status={a.status}  events={events}[/dim]"
         )
+
+
+# ---- hunt ----
+
+_VERDICT_STYLE = {
+    "malicious": "red",
+    "suspicious": "yellow",
+    "unknown": "dim",
+    "clean": "green",
+}
+
+
+@hunt_app.callback()
+def hunt_root(
+    ctx: typer.Context,
+    name: str = typer.Argument(None, help="Device name (optional if only one is registered)."),
+    db: Path | None = DbOption,
+) -> None:
+    """Run the analyzers over the latest snapshot and report findings.
+
+    Reads only what inventory already stored — no device access, no network — so
+    it is safe to re-run after changing an analyzer.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    conn = open_db(db)
+    device = _get_device(conn, name)
+    try:
+        result = hunt_runner.run(conn, device)
+    except hunt_runner.HuntError as e:
+        err.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    console.print(
+        f"[bold]hunt[/bold] {device.name}  snapshot=#{result.snapshot_id}  "
+        f"artifacts={result.artifacts}  findings={len(result.findings)}"
+    )
+    if not result.findings:
+        console.print("[green]no findings[/green]")
+        raise typer.Exit(code=0)
+
+    _render_findings(conn, result.findings)
+    worst = {f.verdict for f in result.findings}
+    raise typer.Exit(code=3 if "malicious" in worst else 2)
+
+
+@hunt_app.command("findings")
+def hunt_findings(
+    verdict: str = typer.Option(
+        None, "--verdict", help="Filter: clean|suspicious|malicious|unknown."
+    ),
+    last: str = typer.Option(None, "--last", help="Window spec, e.g. 24h, 7d."),
+    limit: int = typer.Option(200, "--limit"),
+    db: Path | None = DbOption,
+) -> None:
+    """List stored findings."""
+    conn = open_db(db)
+    since = None
+    if last:
+        try:
+            since = iso_ago(parse_last(last))
+        except ValueError as e:
+            err.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=1) from e
+    verdicts = (verdict,) if verdict else None
+    rows = load_findings(conn, verdicts=verdicts, since_iso=since, limit=limit)
+    if not rows:
+        console.print("[dim]no findings[/dim]")
+        return
+
+    table = Table(title=f"findings ({len(rows)})")
+    table.add_column("verdict")
+    table.add_column("conf")
+    table.add_column("analyzer")
+    table.add_column("rule")
+    table.add_column("subject", overflow="fold")
+    for r in rows:
+        style = _VERDICT_STYLE.get(r["verdict"], "")
+        table.add_row(
+            f"[{style}]{r['verdict']}[/{style}]" if style else r["verdict"],
+            r["confidence"],
+            r["analyzer_id"],
+            r["rule_id"] or "",
+            r["subject_key"],
+        )
+    console.print(table)
+
+
+def _render_findings(conn: sqlite3.Connection, findings: list) -> None:
+    rows = load_findings(conn, limit=10_000)
+    by_id = {r["id"]: r for r in rows}
+    table = Table(title=f"findings ({len(findings)})")
+    table.add_column("verdict")
+    table.add_column("conf")
+    table.add_column("rule")
+    table.add_column("subject", overflow="fold")
+    table.add_column("why", overflow="fold")
+    order = {"malicious": 0, "suspicious": 1, "unknown": 2, "clean": 3}
+    for f in sorted(findings, key=lambda f: (order.get(f.verdict, 9), f.rule_id or "")):
+        row = by_id.get(f.id or -1)
+        style = _VERDICT_STYLE.get(f.verdict, "")
+        table.add_row(
+            f"[{style}]{f.verdict}[/{style}]" if style else f.verdict,
+            f.confidence,
+            f.rule_id or "",
+            row["subject_key"] if row else "",
+            str(f.evidence.get("detail", "")),
+        )
+    console.print(table)
 
 
 # ---- timeline ----

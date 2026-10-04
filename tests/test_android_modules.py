@@ -249,3 +249,25 @@ def test_storage_failure_is_not_an_empty_result():
     result = storage.collect(_shell({"find": (1, "", "permission denied")}))
     assert result.ok is False
     assert result.entries == []
+
+
+# ---------- source classification ----------
+
+
+@pytest.mark.parametrize(
+    ("installer", "code_path", "flags", "expected"),
+    [
+        ("com.android.vending", "/data/app/~~x==/com.a-y==", (), "store"),
+        ("com.xiaomi.discover", "/data/app/~~x==/com.a-y==", (), "oem"),
+        ("com.android.shell", "/data/app/~~x==/com.a-y==", (), "sideload"),
+        # The case that mattered: `adb install` records no installer. Classifying
+        # on the installer alone labelled a sideloaded, debuggable app on the test
+        # device "preinstalled" — the most benign label, for its riskiest package.
+        (None, "/data/app/~~x==/com.a-y==", ("HAS_CODE", "DEBUGGABLE"), "sideload"),
+        (None, "/system/app/Foo", ("SYSTEM", "HAS_CODE"), "preinstalled"),
+        # A system app updated through Play is still part of the OS image.
+        ("com.android.vending", "/system/app/Foo", ("SYSTEM",), "preinstalled"),
+    ],
+)
+def test_source_classification_uses_path_and_flags(installer, code_path, flags, expected):
+    assert pm_list.classify_source(installer, code_path, flags) == expected

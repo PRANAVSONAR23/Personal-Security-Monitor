@@ -93,16 +93,48 @@
   toggled, so the stored identifier goes stale. mDNS advertises a stable name but
   proved flaky in testing, so re-pairing stays manual for now.
 
-## Phase 3 — Hunt v1  ← NEXT
-- [ ] artifacts table populated from inventory
-- [ ] APK pull → staging
-- [ ] analyzers: yara / apk_manifest / apk_signer / known_good / vt
-- [ ] findings upsert + promotion to chained events
-- [ ] `psm hunt` / `hunt findings` / `hunt rescan`
-- [ ] **DECISION:** revisit root
-- [ ] **Exit:** test APK produces evidence-bearing findings
+## Phase 3 — Hunt v1  ✅ COMPLETE (partial, see deferred)
+- [x] artifacts populated from inventory (applications + files); installable files
+      become `apk` artifacts
+- [x] analyzers: `apk_flags` (DEBUGGABLE / TEST_ONLY / weak signing),
+      `apk_source` (sideload), `apk_permissions` (6 permission combos +
+      accessibility + device-admin)
+- [x] findings upsert keyed on (artifact, analyzer, version, rule) — re-running is
+      idempotent, bumping a version records a new row
+- [x] `psm hunt [DEVICE]` / `psm hunt findings`
+- [x] **Exit:** 64 findings over 514 artifacts in 0.09 s, no device access, no
+      network. Correctly isolated the riskiest package on the phone
+      (`com.silvertongue.paraphraser`: sideloaded + debuggable + accessibility
+      service). 146 tests green, ruff + mypy strict clean.
+- [ ] **deferred — APK pull** (`--pull-apks`): only adds signer-certificate detail
+      beyond what the bulk dump already gives. Pull only flagged APKs when needed.
+- [ ] **deferred — YARA**: new C dependency plus community rule sets whose yield
+      against 140 personal PDFs is near-zero. Add when there is a concrete sample
+      to match.
+- [ ] **deferred — `psm hunt rescan`**: `psm hunt` is already re-runnable and
+      idempotent, so a separate verb has nothing to do yet.
+- [ ] **DECISION: root** — still non-root. Everything above works unrooted; only
+      memory inspection and other apps' private storage need it. Unchanged
+      recommendation: not worth a wipe + Play Integrity break.
 
-## Phase 4 — Flowlog leg A (Mac-as-router)
+### VirusTotal: wired but deliberately off
+The ported client is hash-only and opt-in (`PSM_VT_API_KEY` + `--enrich vt`).
+A full sweep of this device is 514 lookups; at the free tier's 4/min that is
+132 minutes and over the 500/day cap, so VT can only ever be targeted at
+artifacts a local analyzer already flagged — never a bulk scan. It is also the one
+thing that leaves the Mac: a hash reveals possession of a file and VT logs queries.
+
+### Found while building Phase 3
+- Inventory stored only `system` from the dumpsys `flags` list, discarding
+  DEBUGGABLE / TEST_ONLY — the two highest-signal manifest facts, already fetched
+  for free. Now stored verbatim.
+- **`installer is None` does not mean preinstalled.** `adb install` records no
+  installer, so classifying on the installer alone labelled a sideloaded,
+  debuggable app with an accessibility service as `preinstalled` — the most benign
+  label available, for the riskiest package on the device. `classify_source` now
+  reads the install path and SYSTEM flag too.
+
+## Phase 4 — Flowlog leg A (Mac-as-router)  ← NEXT
 - [ ] Internet Sharing detection + doctor check
 - [ ] pcap capture on the hotspot interface
 - [ ] decoders: DNS, TLS SNI (+ ECH detection), flow tuples, byte counts

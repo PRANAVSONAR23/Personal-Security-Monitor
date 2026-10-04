@@ -6,7 +6,8 @@ Guidance for Claude Code working in this repository.
 
 **v2 rewrite, in progress on branch `v2/mac-controller`.** Phases 0 (kernel
 port + v1 defect fixes), 1 (macOS inventory) and 2 (Android inventory over
-wireless ADB) are complete; Phase 3 (hunt) is next. See `TODO.md` for progress.
+wireless ADB) and 3 (hunt) are complete; Phase 4 (flowlog, Mac-as-router leg) is
+next. See `TODO.md` for progress.
 
 v1 (branch `main`) was a working Windows-controlled tool — ~4,500 lines, 102
 tests. It is **superseded, not deleted**: its proven core is being ported, its
@@ -85,6 +86,16 @@ declared but unimplemented. Do not design anything that assumes root without
 flagging it. Revisited at Phase 3.
 
 **No TLS interception.** Metadata, DNS, and SNI only.
+
+**VirusTotal is off by default and can never be a bulk scan.** 514 artifacts at
+the free tier's 4 req/min is 132 minutes and over the daily cap. It is also the
+only thing that leaves the Mac. Use it targeted, on artifacts a local analyzer
+already flagged, behind `--enrich vt` and an explicit key.
+
+**Hunt analyzers do no I/O.** They are pure functions of an artifact plus the
+inventory payload already collected, which is what makes `psm hunt` re-runnable
+offline in under a second. Anything needing the APK bytes is a separate opt-in
+step.
 
 **Android bulk reads, never per-package.** `dumpsys package <pkg>` costs 2.3 s
 over wireless; one bulk `dumpsys package packages` covers all 373 packages in
