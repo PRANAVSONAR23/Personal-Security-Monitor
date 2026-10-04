@@ -150,7 +150,7 @@ class Flow:
     dst_port: int
     src_port: int | None = None
     hostname: str | None = None
-    hostname_source: Literal["sni", "dns-query", "dns-cache"] | None = None
+    hostname_source: Literal["sni", "dns-query", "dns-cache", "rdns"] | None = None
     sni_status: Literal["plain", "ech", "none"] | None = None
     app_uid: int | None = None
     app_pkg: str | None = None

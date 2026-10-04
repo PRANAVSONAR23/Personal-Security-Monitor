@@ -175,16 +175,59 @@ the per-app attribution leg A cannot provide, so it is the better next step.
 - A pcap record split across two socket reads was being dropped; the reader now
   carries the partial tail forward.
 
-## Phase 5 — Flowlog leg B (device agent) + correlation  ← NEXT (no hardware needed)
-- [ ] `agent/android-vpn/` Kotlin VpnService, local-only
-- [ ] per-UID attribution + package resolution
-- [ ] log pull over adb + hostile-input parser
-- [ ] correlator; unattributed flows survive
-- [ ] supervisor restart + gap recording (MIUI kills)
-- [ ] MIUI setup doc
-- [ ] **Exit:** `psm flow app com.whatsapp` works; agent death = gap, not loss
+## Phase 5 — Flowlog device leg + correlation  ✅ COMPLETE
+**The VpnService agent was not built — it turned out not to be needed.**
+`/proc/net/{tcp,tcp6,udp,udp6}` is readable over plain `adb exec-out` on a
+non-rooted device and every row carries the owning UID, so per-app attribution
+needs *nothing installed on the phone*.
 
-## Phase 6 — macOS ESF stream
+- [x] `procnet.py` — /proc/net parser; little-endian word addresses, IPv4-mapped
+      IPv6 collapse, TCP state decoding
+- [x] `device.py` — DeviceSource polls over adb, diffs against the previous poll,
+      emits new attributable connections; reverse DNS with a negative cache
+- [x] UID → package from the application inventory already collected (`app_id`),
+      no extra device round trip
+- [x] `correlate.py` — joins the legs on (destination, time window): router
+      hostnames fill device flows, device apps fill router flows; several apps to
+      one address is left ambiguous rather than guessed
+- [x] `psm flow start --leg device|router`, `psm flow correlate`, status covers both
+- [x] 21 tests from real device rows; 191 total, ruff + mypy strict clean
+- [x] **Exit (live on the phone):**
+      `com.instagram.android → edge-mqtt-shv-02-bom5.facebook.com:443`
+      `com.whatsapp          → whatsapp-cdn-shv-02-bom5.fbcdn.net:443`
+      `com.google.android.gms → lcdels-in-f188.1e100.net:5228`
+      `com.xiaomi.xmsf       → 20.157.92.101:5222`
+
+### Why no agent is strictly better here
+Keeps D4 (agentless) intact · nothing for MIUI to kill, which the user's own notes
+flag as the main risk on a 4 GB device · no userspace packet forwarding, so a bug
+cannot take the phone offline · works on mobile data, not only on a network we
+control · no Kotlin app to build, sign, sideload, and maintain.
+
+### What this leg cannot do (and the router leg must cover)
+- **It samples live connections, it is not a complete log.** A socket opened and
+  closed between polls is never seen. Poll cost is ~0.48 s, so ~1 s is the floor.
+- **No per-connection byte counts.** /proc/net carries queue depths, not totals,
+  so these flows store zero bytes. Volume comes from the router leg.
+- **No DNS.** Hostnames here are reverse lookups (`hostname_source="rdns"`), which
+  for CDN addresses often differ from the name the client asked for.
+
+### Found while building Phase 5
+- **Closing sockets lose their owner.** FIN_WAIT1 and LAST_ACK report `uid=0`
+  because the kernel has dropped the owning process — 57 of 78 remote sockets on
+  the test device. Emitting them would have invented 57 flows of apparent *root*
+  network activity. Only attributable states are emitted; the rest are counted and
+  reported so the blind spot stays visible.
+- **Our own adb session is a socket on the phone** (uid 2000, com.android.shell)
+  and accounted for 14 of 21 attributable connections — observer effect, not device
+  behaviour. The controller's own addresses are excluded.
+- Listening sockets are reported as state `0x8A`, not the standard `0x0A`; treating
+  the high bit as part of the state dropped 72 of 150 rows.
+- The IPv4-mapped IPv6 prefix word reads `FFFF0000`, not `0000FFFF`, because each
+  word is little-endian. Hand-rolled IPv6 rendering was replaced with stdlib
+  `ipaddress`, verified against the device's own link-local address.
+
+## Phase 6 — macOS ESF stream  ← NEXT
 - [ ] `streams/esf.py` via eslogger
 - [ ] event subset + volume control
 - [ ] rules over ESF records

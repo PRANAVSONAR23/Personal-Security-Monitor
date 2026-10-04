@@ -128,11 +128,12 @@ CREATE TABLE flows (
     dst_ip     TEXT NOT NULL,
     dst_port   INTEGER NOT NULL,
     hostname   TEXT,
-    -- How the hostname was determined: 'sni' and 'dns-query' are observed on the
-    -- connection itself; 'dns-cache' is an inference from an earlier DNS answer,
-    -- and several names can share one address. Kept so a guess is never shown as
-    -- a fact.
-    hostname_source TEXT CHECK (hostname_source IN ('sni','dns-query','dns-cache')),
+    -- How the hostname was determined, weakest inference last: 'sni' and
+    -- 'dns-query' are observed on the connection itself; 'dns-cache' infers from
+    -- an earlier DNS answer, and several names can share one address; 'rdns' is a
+    -- reverse lookup, which for CDN addresses is often unrelated to the name the
+    -- client actually asked for. Kept so a guess is never shown as a fact.
+    hostname_source TEXT CHECK (hostname_source IN ('sni','dns-query','dns-cache','rdns')),
     sni_status TEXT CHECK (sni_status IN ('plain','ech','none')),
     app_uid    INTEGER,
     app_pkg    TEXT,

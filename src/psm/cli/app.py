@@ -44,6 +44,13 @@ from psm.store.queries import (
     rollup_flows,
     set_alert_status,
 )
+from psm.streams.netflow.correlate import correlate
+from psm.streams.netflow.device import (
+    DeviceSource,
+    local_addresses,
+    to_flow,
+    uid_to_package,
+)
 from psm.streams.netflow.router import RouterSource, hotspot_prefixes
 from psm.streams.netflow.writer import FlowAggregator, persist
 
@@ -645,11 +652,13 @@ FLUSH_EVERY = 500  # packets between database writes
 def flow_status(db: Path | None = DbOption) -> None:
     """Report whether a capture leg can run, and what is stored."""
     conn = open_db(db)
-    source = RouterSource()
-    ok, detail = source.available()
-    mark = "[green]ready[/green]" if ok else "[yellow]unavailable[/yellow]"
-    console.print(f"router leg: {mark}")
-    console.print(f"  {detail}")
+    for label, (ok, detail) in (
+        ("device leg", _device_leg_status(conn)),
+        ("router leg", RouterSource().available()),
+    ):
+        mark = "[green]ready[/green]" if ok else "[yellow]unavailable[/yellow]"
+        console.print(f"{label}: {mark}")
+        console.print(f"  {detail}")
 
     row = conn.execute("SELECT COUNT(*) n, MIN(ts) lo, MAX(ts) hi FROM flows").fetchone()
     console.print(
@@ -660,16 +669,31 @@ def flow_status(db: Path | None = DbOption) -> None:
 
 
 @flow_app.command("start")
-def flow_start(
+def flow_start(  # noqa: PLR0917 — CLI options
     name: str = typer.Argument(None, help="Device the captured traffic belongs to."),
+    leg: str = typer.Option(
+        "device", "--leg", help="device (poll /proc/net over adb) | router (pcap on the bridge)."
+    ),
     interface: str = typer.Option(None, "--interface", help="Override the capture interface."),
     seconds: int = typer.Option(0, "--seconds", help="Stop after N seconds (0 = until Ctrl-C)."),
+    interval: float = typer.Option(1.0, "--interval", help="Device leg poll interval, seconds."),
     db: Path | None = DbOption,
 ) -> None:
-    """Capture flows off the Internet Sharing bridge until stopped."""
+    """Capture flows until stopped.
+
+    The device leg needs nothing installed on the phone and gives per-app
+    attribution. The router leg gives byte counts and DNS/SNI hostnames but needs
+    the phone on the Mac's Internet Sharing hotspot.
+    """
+    if leg not in ("device", "router"):
+        err.print("[red]--leg must be device|router[/red]")
+        raise typer.Exit(code=1)
     conn = open_db(db)
     device = _get_device(conn, name)
     assert device.id is not None
+    if leg == "device":
+        _capture_device(conn, device, seconds=seconds, interval=interval)
+        return
 
     source = RouterSource(interface=interface)
     ok, detail = source.available()
@@ -706,12 +730,88 @@ def flow_start(
         console.print(f"DNS names observed: {len(agg.dns)}")
 
 
+def _capture_device(
+    conn: sqlite3.Connection, device: Device, *, seconds: int, interval: float
+) -> None:
+    """Poll /proc/net over adb and record attributable connections."""
+    if device.platform != "android":
+        err.print(f"[red]the device leg is Android-only; {device.name} is {device.platform}[/red]")
+        raise typer.Exit(code=1)
+    assert device.id is not None
+
+    adb_path = adb.find_adb()
+    serial = device.identifier
+
+    def shell(cmd: str) -> tuple[int, str, str]:
+        try:
+            result = adb.shell(adb_path, serial, cmd, timeout_s=30)
+        except adb.AdbError as e:
+            return (-1, "", str(e))
+        return (result.returncode, result.stdout, result.stderr)
+
+    source = DeviceSource(shell=shell, interval_s=interval, exclude_ips=local_addresses())
+    ok, why = source.available()
+    if not ok:
+        err.print(f"[red]cannot start device leg:[/red] {why}")
+        raise typer.Exit(code=1)
+
+    uid_map = uid_to_package(conn, device.id)
+    console.print(
+        f"polling [cyan]{serial}[/cyan] every {interval}s "
+        f"({len(uid_map)} uid→package entries) — Ctrl-C to stop"
+    )
+    deadline = time.monotonic() + seconds if seconds else None
+    written = 0
+    try:
+        for sock in source.subscribe():
+            flow = to_flow(source, sock, device.id, uid_map)
+            with transaction(conn):
+                written += persist(conn, [flow])
+            console.print(
+                f"  [dim]{flow.ts}[/dim] {flow.app_pkg or f'uid:{sock.uid}'} → "
+                f"{flow.hostname or flow.dst_ip}:{flow.dst_port}"
+            )
+            if deadline and time.monotonic() > deadline:
+                break
+    except KeyboardInterrupt:
+        console.print("\n[dim]stopping[/dim]")
+    finally:
+        source.stop()
+
+    console.print(f"[green]recorded[/green] {written} connection(s)")
+    if source.skipped_unattributable:
+        console.print(
+            f"[dim]{source.skipped_unattributable} closing socket(s) skipped — the kernel "
+            f"drops the owning uid once a socket starts closing, so they cannot be "
+            f"attributed[/dim]"
+        )
+
+
 def _flush(conn: sqlite3.Connection, agg: FlowAggregator) -> int:
     flows = agg.drain()
     if not flows:
         return 0
     with transaction(conn):
         return persist(conn, flows)
+
+
+@flow_app.command("correlate")
+def flow_correlate(
+    name: str = typer.Argument(None, help="Device name."),
+    window: int = typer.Option(30, "--window", help="Join window in seconds."),
+    db: Path | None = DbOption,
+) -> None:
+    """Fill each leg's gaps from the other: router hostnames onto device-leg flows,
+    device-leg apps onto router flows."""
+    conn = open_db(db)
+    device = _get_device(conn, name)
+    assert device.id is not None
+    with transaction(conn):
+        result = correlate(conn, device.id, window_s=window)
+    console.print(
+        f"[green]correlated[/green] hostnames filled={result.hostnames_filled}  "
+        f"apps filled={result.apps_filled}  ambiguous={result.ambiguous}"
+    )
 
 
 @flow_app.command("top")
@@ -817,6 +917,26 @@ def flow_rollup(
         f"[green]rolled up[/green] {len(hours)} hour(s); purged {purged} raw row(s) "
         f"older than {keep_days}d"
     )
+
+
+def _device_leg_status(conn: sqlite3.Connection) -> tuple[bool, str]:
+    rows = conn.execute("SELECT name, identifier FROM devices WHERE platform='android'").fetchall()
+    if not rows:
+        return False, "no android device registered"
+    try:
+        adb_path = adb.find_adb()
+    except adb.AdbNotFound as e:
+        return False, str(e)
+    serial = rows[0]["identifier"]
+
+    def shell(cmd: str) -> tuple[int, str, str]:
+        try:
+            r = adb.shell(adb_path, serial, cmd, timeout_s=15)
+        except adb.AdbError as e:
+            return (-1, "", str(e))
+        return (r.returncode, r.stdout, r.stderr)
+
+    return DeviceSource(shell=shell).available()
 
 
 def _bytes(n: int | None) -> str:

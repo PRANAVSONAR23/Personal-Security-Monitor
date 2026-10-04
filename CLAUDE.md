@@ -6,11 +6,10 @@ Guidance for Claude Code working in this repository.
 
 **v2 rewrite, in progress on branch `v2/mac-controller`.** Phases 0 (kernel
 port + v1 defect fixes), 1 (macOS inventory) and 2 (Android inventory over
-wireless ADB) and 3 (hunt) are complete. Phase 4 built the shared packet decoders
-and the router capture leg, but that leg's **live test is blocked**: this Mac has
-only a Wi-Fi uplink and macOS cannot share Wi-Fi over Wi-Fi, so no hotspot bridge
-exists to capture on. Phase 5 (on-device VPN leg) is next — it needs no extra
-hardware and reuses the same decoders. See `TODO.md`.
+wireless ADB), 3 (hunt) and 5 (flowlog device leg) are complete. Phase 4's router
+leg is built but its **live test is blocked**: this Mac has only a Wi-Fi uplink and
+macOS cannot share Wi-Fi over Wi-Fi, so no hotspot bridge exists to capture on.
+Phase 6 (macOS ESF stream) is next. See `TODO.md`.
 
 v1 (branch `main`) was a working Windows-controlled tool — ~4,500 lines, 102
 tests. It is **superseded, not deleted**: its proven core is being ported, its
@@ -94,6 +93,14 @@ flagging it. Revisited at Phase 3.
 the free tier's 4 req/min is 132 minutes and over the daily cap. It is also the
 only thing that leaves the Mac. Use it targeted, on artifacts a local analyzer
 already flagged, behind `--enrich vt` and an explicit key.
+
+**Android per-app network attribution needs no agent.** `/proc/net/*` is readable
+over `adb exec-out` and carries the owning UID. Do not reach for a VpnService —
+it was designed and then dropped because the platform already exposes this. Two
+hard rules from real data: only emit sockets in `ATTRIBUTABLE_STATES` (closing
+sockets report `uid=0` because the kernel drops the owner — 57 of 78 on the test
+device), and exclude the controller's own addresses (our adb session is itself a
+socket on the phone).
 
 **Packet decoders are shared by both capture legs.** `streams/netflow/decode.py`
 takes a `linktype`: Ethernet for the router bridge, `LINKTYPE_RAW` for a TUN. Do
