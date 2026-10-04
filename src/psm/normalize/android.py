@@ -3,6 +3,7 @@
 Subject key formats (LLD §1):
   application: `pkg:<package-id>`
   permission : `perm:<package-id>:<permission>`
+  file       : `file:<abs-path>` (ext4/f2fs is case-sensitive; NFC only, no fold)
 
 For permissions, the subject key intentionally includes the permission — so revoking
 a runtime permission surfaces as `permission removed` rather than `changed`.
@@ -36,6 +37,15 @@ class AndroidNormalizer(Normalizer):
                     category="permission",
                     subject_key=f"perm:{entry['pkg']}:{entry['permission']}",
                     payload=payload,
+                )
+            )
+
+        for entry in bundle.raw.get("file", []) or []:
+            items.append(
+                InventoryItem(
+                    category="file",
+                    subject_key=f"file:{entry['path']}",
+                    payload=entry,
                 )
             )
 

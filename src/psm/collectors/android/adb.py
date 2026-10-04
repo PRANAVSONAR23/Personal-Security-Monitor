@@ -14,8 +14,10 @@ Non-zero exits and parse failures become CollectionGaps upstream — never scan 
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +27,8 @@ from psm.collectors.subprocess_util import (
     ProcTimeout,
     run,
 )
+
+log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 30
 SHELL_OUTPUT_CAP = 8 * 1024 * 1024  # LLD §3.5
@@ -108,6 +112,16 @@ def list_devices(adb: Path, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[AdbDe
     return devices
 
 
+# adb-over-TLS (wireless debugging) intermittently leaks TLS record header bytes
+# into its own framing on large transfers, failing with
+# "protocol fault (status 17 03 03 00?!)". It is transient: the same 1.9 MB
+# `dumpsys package packages` that fails one second succeeds the next. Observed on
+# SDK 31 over wireless with adb 37.0.1.
+_PROTOCOL_FAULT = "protocol fault"
+PROTOCOL_FAULT_RETRIES = 3
+RETRY_BACKOFF_S = 1.0
+
+
 def shell(
     adb: Path,
     serial: str,
@@ -115,21 +129,30 @@ def shell(
     *,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     output_cap: int = SHELL_OUTPUT_CAP,
+    retries: int = PROTOCOL_FAULT_RETRIES,
 ) -> ShellResult:
-    """Run a shell command on the device. Returns stdout as decoded text.
+    """Run a command on the device via `exec-out`. Returns stdout as decoded text.
+
+    `exec-out` rather than `shell`: it skips the pty layer, so output is byte-exact
+    and never gains CRLF translation that would break indentation-sensitive parsing.
 
     Non-zero exit is NOT raised — the caller decides how to treat it (usually a gap).
+    Transient protocol faults are retried; a persistent one is returned as a failure.
     """
-    result = _run_adb(
-        [str(adb), "-s", serial, "shell", command],
-        timeout_s=timeout_s,
-        output_cap=output_cap,
-    )
-    return ShellResult(
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
-    )
+    argv = [str(adb), "-s", serial, "exec-out", command]
+    for attempt in range(retries):
+        result = _run_adb(argv, timeout_s=timeout_s, output_cap=output_cap)
+        if result.returncode == 0 or _PROTOCOL_FAULT not in result.stderr:
+            return ShellResult(
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+        log.warning(
+            "adb protocol fault on %r (attempt %d/%d), retrying", command, attempt + 1, retries
+        )
+        time.sleep(RETRY_BACKOFF_S)
+    return ShellResult(returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
 
 
 def get_sdk_level(adb: Path, serial: str, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> int | None:

@@ -4,9 +4,9 @@ Guidance for Claude Code working in this repository.
 
 ## Project status
 
-**v2 rewrite, in progress on branch `v2/mac-controller`.** Phases 0 (kernel port
-+ v1 defect fixes) and 1 (macOS inventory collector) are complete; Phase 2
-(Android inventory over wireless ADB) is next. See `TODO.md` for live progress.
+**v2 rewrite, in progress on branch `v2/mac-controller`.** Phases 0 (kernel
+port + v1 defect fixes), 1 (macOS inventory) and 2 (Android inventory over
+wireless ADB) are complete; Phase 3 (hunt) is next. See `TODO.md` for progress.
 
 v1 (branch `main`) was a working Windows-controlled tool — ~4,500 lines, 102
 tests. It is **superseded, not deleted**: its proven core is being ported, its
@@ -85,6 +85,16 @@ declared but unimplemented. Do not design anything that assumes root without
 flagging it. Revisited at Phase 3.
 
 **No TLS interception.** Metadata, DNS, and SNI only.
+
+**Android bulk reads, never per-package.** `dumpsys package <pkg>` costs 2.3 s
+over wireless; one bulk `dumpsys package packages` covers all 373 packages in
+5.7 s. Per-package loops are a ~14-minute scan.
+
+**adb-over-TLS lies.** It returns truncated output with exit code 0, and throws
+transient `protocol fault` errors. `adb.shell()` uses `exec-out` and retries
+protocol faults; bulk package reads are cross-checked against an independent
+`pm list` roster, because a short dump parses cleanly and would otherwise be
+stored as a complete inventory.
 
 ## Conventions
 

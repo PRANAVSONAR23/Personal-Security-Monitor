@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from psm.collectors.android import adb
-from psm.collectors.android.modules import packages, special_access
+from psm.collectors.android.modules import packages, special_access, storage
 from psm.collectors.base import Collector, RawBundle
 from psm.core.models import CollectionGap, Device
 
@@ -24,14 +24,16 @@ ShellFn = Callable[[str], tuple[int, str, str]]
 class AndroidConfig:
     adb_path: Path | None = None
     shell_fn: ShellFn | None = None  # overrides adb-based shell for tests
-    modules: tuple[str, ...] = ("application", "permission")
+    modules: tuple[str, ...] = ("application", "permission", "file")
+    storage_roots: tuple[str, ...] = storage.DEFAULT_ROOTS
+    max_file_mb: int = storage.DEFAULT_MAX_FILE_MB
     sdk_level_override: int | None = None
     detected_sdk_level: int | None = field(default=None)  # populated during collect()
 
 
 class AndroidCollector(Collector):
     platform = "android"
-    ALL_MODULES: tuple[str, ...] = ("application", "permission")
+    ALL_MODULES: tuple[str, ...] = ("application", "permission", "file")
 
     def __init__(self, config: AndroidConfig | None = None) -> None:
         self.config = config or AndroidConfig()
@@ -76,25 +78,34 @@ class AndroidCollector(Collector):
         # F1: record() marks a category collected; a module that fails records a
         # gap and stays out of `collected`, so the diff skips it rather than
         # reporting every item in it as removed.
-        pkg_entries: list[dict[str, Any]] = []
-        dumps: dict[str, str] = {}
-        if "application" in modules:
-            result = packages.collect(shell)
+        # One bulk dumpsys yields both categories; see modules/packages.py for
+        # why this is not a per-package loop.
+        if {"application", "permission"} & modules:
+            apps, perms = packages.collect(shell)
+            bundle.gaps.extend(apps.gaps)
+            if "application" in modules and apps.ok:
+                bundle.record("application", apps.entries)
+
+            if "permission" in modules:
+                special = special_access.collect(shell)
+                bundle.gaps.extend(perms.gaps)
+                bundle.gaps.extend(special.gaps)
+                # Both feed one category, so both must succeed. Recording the
+                # category when only one worked would claim a complete permission
+                # set that is missing half its sources — and the next successful
+                # scan would then report every missing row as newly added.
+                if perms.ok and special.ok:
+                    bundle.record("permission", perms.entries + special.entries)
+
+        if "file" in modules and self.config.storage_roots:
+            result = storage.collect(
+                shell,
+                roots=self.config.storage_roots,
+                max_file_mb=self.config.max_file_mb,
+            )
             bundle.gaps.extend(result.gaps)
             if result.ok:
-                pkg_entries = result.entries
-                dumps = result.dumps
-                bundle.record("application", pkg_entries)
-
-        if "permission" in modules:
-            # Reuses the dumpsys output already captured above — v1 shelled out a
-            # second time per package, doubling ADB round trips.
-            perm_result = packages.collect_permissions(dumps)
-            special_result = special_access.collect(shell)
-            bundle.gaps.extend(perm_result.gaps)
-            bundle.gaps.extend(special_result.gaps)
-            if perm_result.ok or special_result.ok:
-                bundle.record("permission", perm_result.entries + special_result.entries)
+                bundle.record("file", result.entries)
 
         return bundle
 

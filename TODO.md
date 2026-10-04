@@ -61,15 +61,39 @@
 - Chromium `manifest.theme` is usually `{}` — falsy, so a truth test fails to
   filter themes out of the extension list.
 
-## Phase 2 — Android inventory collector  ← NEXT
-- [ ] adb wrapper + `adb pair`/`connect` flow (wireless)
-- [ ] **single-pass** `dumpsys package` (v1 called it 2×/package)
-- [ ] modules: packages / permissions / special_access / storage / downloads
-- [ ] Android 12 (MIUI 14) golden fixtures
-- [ ] `psm doctor phone` + MIUI guidance
-- [ ] **Exit:** APK install + permission grant → exact events, < 90 s
+## Phase 2 — Android inventory collector  ✅ COMPLETE
+- [x] adb ported to macOS (`adb.exe` → `adb`, ANDROID_HOME discovery); wireless
+      pairing verified against the POCO
+- [x] **one bulk `dumpsys package packages`** instead of per-package calls
+- [x] modules: packages / permissions / special_access / storage
+      (downloads folded into storage — /sdcard/Download is one of its roots)
+- [x] Android 31 (MIUI 14) fixture + 22 module tests + 4 e2e tests
+- [x] `psm doctor phone` — tiers, adb state, wireless re-pair guidance
+- [x] **Exit:** planted an installable file in /sdcard/Download → surfaced as a
+      `warning` via the new rule, removal detected, chain verifies.
+      **5.7 s cold, 4.0 s warm** (target < 90 s). 1,257 items: 743 permissions,
+      373 applications, 141 files. 124 tests green, ruff + mypy strict clean.
 
-## Phase 3 — Hunt v1
+### Found while building Phase 2
+- **Per-package `dumpsys` is unusable over wireless.** 2.3 s per call × 373
+  packages ≈ 14 min. v1 issued two per package. One bulk call is 5.7 s.
+- **adb-over-TLS returns truncated output with exit code 0.** One run yielded 295
+  of 373 packages, parsed cleanly, and would have been stored as the complete
+  inventory — every later scan then reporting the missing 78 as newly installed.
+  Guarded by cross-checking against an independent `pm list` roster.
+- adb-over-TLS also throws transient `protocol fault (status 17 03 03 00?!)`;
+  `shell()` now uses `exec-out` and retries protocol faults.
+- v1's parser read `appId=`, which does not exist on this device (`userId=`), so
+  its app-id field was always None.
+- `com.xiaomi.discover` (36 apps), `com.facebook.system` (3) and
+  `com.miui.analytics` (1) were unmapped installers → classified `unknown` →
+  the sideload rule matched `unknown` → **40 false alerts on the first scan**.
+  Installer map extended; rule narrowed to `sideload` only.
+- Wireless adb serials (`IP:port`) rotate whenever wireless debugging is
+  toggled, so the stored identifier goes stale. mDNS advertises a stable name but
+  proved flaky in testing, so re-pairing stays manual for now.
+
+## Phase 3 — Hunt v1  ← NEXT
 - [ ] artifacts table populated from inventory
 - [ ] APK pull → staging
 - [ ] analyzers: yara / apk_manifest / apk_signer / known_good / vt
@@ -111,6 +135,7 @@
 
 ## Environment notes
 - `adb`: `/opt/homebrew/share/android-commandlinetools/platform-tools/adb` (v37.0.1), not on PATH
+- phone paired over wireless debugging; serial `192.168.1.6:42137` (rotates on toggle)
 - `ANDROID_HOME=/opt/homebrew/share/android-commandlinetools`
 - `JAVA_HOME=/opt/homebrew/opt/openjdk@17` (needed for the Kotlin agent, Phase 5)
 - No system Python 3.12 — use `uv`

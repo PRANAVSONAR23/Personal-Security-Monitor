@@ -1,3 +1,7 @@
+# `unknown` is deliberately not matched: it means the installer was not one we
+# recognise, not that the package was sideloaded. On the MIUI test device 40
+# packages fell into `unknown` via OEM channels, each of which would have fired
+# this rule on the very first scan.
 id: sideloaded-install
 severity: alert
 title: "Sideloaded package installed (Android)"
@@ -5,4 +9,4 @@ match:
   category: application
   action: added
   where:
-    payload.source: ["sideload", "unknown"]
+    payload.source: "sideload"

@@ -1,0 +1,12 @@
+# An APK/DEX/JAR appearing in shared storage is the normal first step of a
+# sideload. It is not proof of anything — browsers drop APKs there legitimately —
+# so this is a warning, not an alert. `sideloaded-install` is what fires if the
+# package actually gets installed.
+id: new-installable-in-shared-storage
+severity: warning
+title: "New installable file in shared storage"
+match:
+  category: file
+  action: added
+  where:
+    payload.installable: true

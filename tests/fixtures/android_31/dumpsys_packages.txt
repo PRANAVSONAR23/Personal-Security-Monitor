@@ -1,0 +1,58 @@
+Packages:
+  Package [com.example.store] (abc1234):
+    userId=10074
+    codePath=/data/app/~~AAAA==/com.example.store-BBBB==
+    primaryCpuAbi=arm64-v8a
+    versionCode=2638006 minSdk=29 targetSdk=36
+    versionName=26.38.6
+    splits=[base, config.arm64_v8a]
+    apkSigningVersion=3
+    flags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP ]
+    dataDir=/data/user/0/com.example.store
+    timeStamp=2026-09-30 16:46:33
+    firstInstallTime=2020-11-27 14:33:42
+    lastUpdateTime=2026-09-30 16:46:51
+    installerPackageName=com.android.vending
+    install permissions:
+      android.permission.INTERNET: granted=true
+      android.permission.WAKE_LOCK: granted=true
+    User 0: ceDataInode=4030 installed=true hidden=false suspended=false distractionFlags=0 stopped=false notLaunched=false enabled=1 instant=false virtual=false
+      gids=[3003]
+      runtime permissions:
+        android.permission.CAMERA: granted=true, flags=[ USER_SET|USER_SENSITIVE_WHEN_GRANTED]
+        android.permission.READ_SMS: granted=false, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]
+      disabledComponents:
+        com.example.store.SomeReceiver
+    User 999: ceDataInode=0 installed=false hidden=false suspended=false distractionFlags=0 stopped=false notLaunched=false enabled=0 instant=false virtual=false
+      runtime permissions:
+        android.permission.CAMERA: granted=false, flags=[ ]
+  Package [com.example.oem] (def5678):
+    userId=10100
+    codePath=/product/app/OemApp
+    versionCode=1 minSdk=29 targetSdk=31
+    versionName=1.0.0
+    apkSigningVersion=3
+    flags=[ SYSTEM HAS_CODE ALLOW_BACKUP ]
+    timeStamp=1970-01-01 05:30:00
+    firstInstallTime=1970-01-01 05:30:00
+    lastUpdateTime=1970-01-01 05:30:00
+    installerPackageName=com.xiaomi.discover
+    User 0: ceDataInode=5000 installed=true hidden=false suspended=false distractionFlags=0 stopped=false notLaunched=false enabled=0 instant=false virtual=false
+  Package [com.example.preinstalled] (999aaaa):
+    userId=10200
+    codePath=/system/app/Preinstalled
+    versionCode=33 minSdk=29 targetSdk=33
+    versionName=3.3
+    apkSigningVersion=3
+    flags=[ SYSTEM HAS_CODE ]
+    firstInstallTime=1970-01-01 05:30:00
+    lastUpdateTime=1970-01-01 05:30:00
+    User 0: ceDataInode=6000 installed=true hidden=false suspended=false distractionFlags=0 stopped=false notLaunched=false enabled=1 instant=false virtual=false
+Hidden system packages:
+  Package [com.example.preinstalled] (shadow01):
+    userId=10200
+    codePath=/system/app/Preinstalled
+    versionCode=1 minSdk=29 targetSdk=29
+    versionName=1.0
+    apkSigningVersion=3
+    flags=[ SYSTEM HAS_CODE ]

@@ -56,6 +56,13 @@ _STORE_INSTALLERS = {
     "com.xiaomi.mipicks": "store",
     "com.oppo.market": "store",
     "com.heytap.market": "store",
+    # OEM channels. On MIUI these account for most preinstalled apps; leaving
+    # them unmapped classified 40 packages on the test device as "unknown",
+    # which the sideload rule then alerted on.
+    "com.xiaomi.discover": "oem",
+    "com.miui.analytics": "oem",
+    "com.miui.packageinstaller": "sideload",
+    "com.facebook.system": "oem",
     "com.google.android.packageinstaller": "sideload",
     "com.android.packageinstaller": "sideload",
     "com.android.shell": "sideload",  # `adb install` uses this
